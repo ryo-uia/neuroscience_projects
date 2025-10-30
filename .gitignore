@@ -1,0 +1,8 @@
+# Compiled Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local cache folders
+cached_*/
+
