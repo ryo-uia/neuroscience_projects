@@ -33,7 +33,7 @@ from Functions.si_utils import (
 # Configuration
 # ---------------------------------------------------------------------
 
-TEST_SECONDS = None  # set to None for full recording
+TEST_SECONDS = 300  # set to None for full recording
 ROOT_DIR = Path(r"C:/Users/ryoi/Documents/SpikeSorting/recordings")
 SESSION_SUBPATH = None  # provide relative Open Ephys path to skip auto-discovery
 SESSION_SELECTION = "latest"  # "latest", "earliest", or "index"
@@ -262,7 +262,20 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
     export_to_phy(analyzer, output_folder=folder, remove_if_exists=True)
     params_path = folder / "params.py"
 
+    cache_dir = folder / ".phy"
+    if cache_dir.exists():
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        print(f"Removed stale Phy cache at {cache_dir}")
+
     channel_ids_rec = list(analyzer.recording.channel_ids)
+    try:
+        group_prop_check = analyzer.recording.get_property("group")
+        if group_prop_check is None:
+            print("Warning: analyzer has no 'group' property.")
+        else:
+            print(f"'group' property unique values: {np.unique(group_prop_check)}")
+    except Exception as exc:
+        print(f"Warning: could not read 'group' property: {exc}")
     def lookup_index(ch, fallback):
         if ch in original_index_map:
             return int(original_index_map[ch])
@@ -350,6 +363,36 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
         except Exception as exc:
             print(f"Warning: could not overwrite channel_shanks.npy: {exc}")
         params_path.write_text(text)
+
+    # Rebuild cluster-level channel group assignments for Phy.
+    try:
+        spike_clusters = np.load(folder / "spike_clusters.npy")
+        spike_templates = np.load(folder / "spike_templates.npy")
+        template_ind = np.load(folder / "template_ind.npy")
+        templates = np.load(folder / "templates.npy")
+
+        peak_local = np.argmax(np.max(np.abs(templates), axis=1), axis=1)
+        peak_channels = template_ind[np.arange(template_ind.shape[0]), peak_local]
+
+        n_clusters = int(spike_clusters.max()) + 1 if spike_clusters.size else 0
+        cluster_channel_groups = np.zeros(n_clusters, dtype=int)
+        for cluster_id in np.unique(spike_clusters):
+            mask = spike_clusters == cluster_id
+            template_counts = np.bincount(spike_templates[mask], minlength=peak_channels.shape[0])
+            best_template = int(np.argmax(template_counts))
+            peak_channel = int(peak_channels[best_template])
+            if 0 <= peak_channel < channel_groups_out.size:
+                cluster_channel_groups[cluster_id] = int(channel_groups_out[peak_channel])
+
+        cluster_file = folder / "cluster_channel_group.tsv"
+        with cluster_file.open("w", encoding="utf-8") as f:
+            f.write("cluster_id\tchannel_group\n")
+            for cid, group_val in enumerate(cluster_channel_groups):
+                f.write(f"{cid}\t{int(group_val)}\n")
+        print("Regenerated cluster_channel_group.tsv with tetrode indices.")
+    except Exception as exc:
+        print(f"Warning: could not recompute cluster channel groups: {exc}")
+
     print(f"Exported {label} to Phy folder {folder}")
 
 
@@ -468,3 +511,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
