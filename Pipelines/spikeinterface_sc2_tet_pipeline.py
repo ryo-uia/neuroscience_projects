@@ -41,6 +41,10 @@ SESSION_INDEX = 0  # used only when SESSION_SELECTION == "index"
 
 BASE_OUT = Path(r"C:/Users/ryoi/Documents/SpikeSorting")
 SC2_OUT = BASE_OUT / "sc2_outputs"
+SI_GUI_OUT = BASE_OUT / "si_gui_exports"
+
+EXPORT_TO_PHY = True
+EXPORT_TO_SI_GUI = False
 
 STREAM_NAME = None  # e.g. "Record Node 125#Acquisition_Board-100.Rhythm Data"
 
@@ -396,6 +400,15 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
     print(f"Exported {label} to Phy folder {folder}")
 
 
+def export_for_si_gui(analyzer, base_folder: Path, label: str):
+    """Save a Zarr copy that SpikeInterface GUI can open directly."""
+    folder = base_folder / f"si_gui_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    safe_rmtree(folder)
+    analyzer.save_as(format="zarr", folder=folder)
+    print(f"Exported {label} analyzer to SpikeInterface GUI folder {folder}")
+    return folder
+
+
 # ---------------------------------------------------------------------
 # Main routine
 # ---------------------------------------------------------------------
@@ -403,6 +416,8 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
 
 def main():
     SC2_OUT.mkdir(parents=True, exist_ok=True)
+    if EXPORT_TO_SI_GUI:
+        SI_GUI_OUT.mkdir(parents=True, exist_ok=True)
 
     data_path = choose_recording_folder(ROOT_DIR, SESSION_SUBPATH, SESSION_SELECTION, SESSION_INDEX)
     print(f"Recording root: {ROOT_DIR}")
@@ -504,7 +519,10 @@ def main():
 
     analyzer_sc2 = build_analyzer(sorting_sc2, rec_sc2, SC2_OUT, "sc2")
 
-    export_for_phy(analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map)
+    if EXPORT_TO_PHY:
+        export_for_phy(analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map)
+    if EXPORT_TO_SI_GUI:
+        export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
 
     print("SC2 pipeline complete.")
 
