@@ -33,7 +33,7 @@ from Functions.si_utils import (
 # Configuration
 # ---------------------------------------------------------------------
 
-TEST_SECONDS = 300  # set to None for full recording
+TEST_SECONDS = None  # set to None for full recording
 ROOT_DIR = Path(r"C:/Users/ryoi/Documents/SpikeSorting/recordings")
 SESSION_SUBPATH = None  # provide relative Open Ephys path to skip auto-discovery
 SESSION_SELECTION = "latest"  # "latest", "earliest", or "index"
