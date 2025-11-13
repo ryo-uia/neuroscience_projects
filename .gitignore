@@ -205,3 +205,19 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# ---------------------------------------------------------------------
+# Project-specific ignores (local spike-sorting workspace artifacts)
+# ---------------------------------------------------------------------
+
+# Large local datasets and outputs live outside the repo and should not be tracked.
+Archives/
+Backup/
+Practice/
+recordings/
+sc2_outputs/
+si_gui_exports/
+*.log
+*.dat
+*.bin
+*.npy
+*.npz
