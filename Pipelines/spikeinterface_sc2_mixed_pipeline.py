@@ -1,5 +1,5 @@
 """
-Minimal SpikeInterface pipeline to run SpykingCircus2 on tetrode recordings.
+Minimal SpikeInterface pipeline to run SpykingCircus2 on tetrode/stereotrode recordings.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import traceback
 import warnings
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable, List, Sequence
 
 import numpy as np
 import spikeinterface.extractors as se
@@ -42,7 +43,7 @@ from Functions.pipeline_utils import (
 )
 
 # ---------------------------------------------------------------------
-# User configuration
+# Configuration
 # ---------------------------------------------------------------------
 
 # Session/data selection
@@ -63,11 +64,10 @@ EXPORT_TO_PHY = True
 EXPORT_TO_SI_GUI = False
 EXPORT_PHY_EXTRACT_WAVEFORMS = False  # run `phy extract-waveforms` to precompute Phy waveforms (UI speed only; requires Phy CLI)
 
-# Channel grouping (tetrodes)
-CHANNELS_PER_TETRODE = 4
-# Optional explicit channel grouping. If set, this fixed map is used instead of chunking by order
-# (prevents shifts after bad-channel removal).
-CHANNEL_GROUPS = [
+# Channel grouping (tetrodes/stereotrodes)
+# Optional explicit grouping: each inner list is a tetrode or stereotrode.
+# You can mix sizes, e.g., [[0, 1, 2, 3], [4, 5], [6, 7, 8, 9]].
+CHANNEL_GROUPS: list[list[int | str]] = [
     ["CH40", "CH38", "CH36", "CH34"],  # TT1A-D
     ["CH48", "CH46", "CH44", "CH42"],  # TT2A-D
     ["CH56", "CH54", "CH52", "CH50"],  # TT3A-D
@@ -86,10 +86,11 @@ CHANNEL_GROUPS = [
     ["CH26", "CH28", "CH30", "CH32"],  # TT16A-D
 ]
 CHANNEL_GROUPS_PATH = None  # optional JSON file path or env SPIKESORT_CHANNEL_GROUPS
-STRICT_GROUPS = True  # error out if no valid groups can be resolved (recommended for tetrodes)
+CHANNELS_PER_TETRODE = 4  # fallback chunk size when CHANNEL_GROUPS is empty
+STRICT_GROUPS = True  # error out if no valid groups can be resolved (recommended)
 
-# Bad channels (use IDs to avoid positional mismatch across sessions or after slicing)
-BAD_CHANNELS = ["CH63", "CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"]
+# Bad channels (use IDs to avoid positional mismatch across sessions)
+BAD_CHANNELS = ["CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"]
 BAD_CHANNELS_PATH = None  # optional JSON file path or env SPIKESORT_BAD_CHANNELS
 AUTO_BAD_CHANNELS = False  # auto-detect bad channels (merged with manual list; can be aggressive)
 
@@ -98,12 +99,15 @@ ATTACH_GEOMETRY = True
 LINEARIZE_TRACEVIEW = True
 TRACEVIEW_CONTACT_SPACING_UM = 20.0
 TRACEVIEW_GROUP_SPACING_UM = 200.0
+LABEL_STEREOTRODES_AS_MUA = True
+STEREOTRODE_MUA_LABEL = "mua"
+DEFAULT_CLUSTER_LABEL = "unsorted"
 
 # Optional SI preprocessing: bandpass (+ optional notch/CAR/whitening).
 # When enabled, SC2 filtering/CMR are disabled, but SC2 still whitens internally.
-USE_SI_PREPROCESS = False
+USE_SI_PREPROCESS = True
 SI_BP_MIN_HZ = 150
-SI_BP_MAX_HZ = 7000
+SI_BP_MAX_HZ = 6000
 SI_BP_FTYPE = "bessel"
 SI_BP_ORDER = 2
 SI_BP_MARGIN_MS = 10
@@ -117,10 +121,10 @@ SI_WHITEN_RADIUS_UM = 100.0  # used when SI_WHITEN_MODE == "local"
 
 # Optional SI common reference before SC2. SC2 preprocessing (when enabled) does its own bandpass/CMR/whitening.
 SI_APPLY_CAR = False
-# "tetrode" -> per-tetrode CAR; "global" -> CAR over all channels
-CAR_MODE = "global"
+# "group" -> per-group CAR; "global" -> CAR over all channels
+CAR_MODE = "group"
 CAR_OPERATOR = "median"  # "median" (robust) or "average"
-# Tetrodes: per-tetrode median is common but can induce bipolar spikes with small/imbalanced groups; global is safer.
+# Tetrodes: per-group median is common but can induce bipolar spikes with small/imbalanced groups; global is safer.
 
 # Optional notch filtering (applies after SI bandpass when USE_SI_PREPROCESS=True,
 # or before SC2 preprocessing when USE_SI_PREPROCESS=False).
@@ -130,25 +134,19 @@ NOTCH_Q = 30
 
 # Optional bandpass copy for Phy/export (useful when SC2 preprocessing is enabled so Phy doesn't read raw).
 EXPORT_BANDPASS_FOR_PHY = True
-EXPORT_BP_MIN_HZ = SI_BP_MIN_HZ
-EXPORT_BP_MAX_HZ = SI_BP_MAX_HZ
-EXPORT_BP_FTYPE = SI_BP_FTYPE
-EXPORT_BP_ORDER = SI_BP_ORDER
-EXPORT_BP_MARGIN_MS = SI_BP_MARGIN_MS
+EXPORT_BP_MIN_HZ = 150
+EXPORT_BP_MAX_HZ = 6000
+EXPORT_BP_FTYPE = "bessel"
+EXPORT_BP_ORDER = 2
+EXPORT_BP_MARGIN_MS = 10
 EXPORT_SCALE_TO_UV = True  # scale export recording to microvolts if gain info is present
+EXPORT_SPARSE_CHANNELS = 4  # placeholder for future Phy sparsity export (currently unused)
 
 # Optional overrides for SpykingCircus2 parameters (keys mirror default params structure)
-# Add tweaks here if you need to change SC2 defaults (filtering, thresholds, etc.).
-SC2_PARAM_OVERRIDES = {
-    # Example: disable SC2 filtering when using SI preprocessing
-    # "preprocessing": {
-    #     "apply": False,
-    # },
-    # Example: adjust detection threshold
-    # "detection": {
-    #     "peak_sign": "both",
-    #     "relative_threshold": 5.0,
-    # },
+SC2_PARAM_OVERRIDES: dict = {
+    # Example tweaks:
+    # "filtering": {"freq_min": 300, "freq_max": 6000},
+    # "detection": {"method_kwargs": {"detect_threshold": 4}},
 }
 
 # Optional: print stack traces for warnings (debug-only).
@@ -163,10 +161,31 @@ def enable_warning_trace(limit: int = 12) -> None:
     warnings.showwarning = _showwarning
     warnings.simplefilter("always")
 
+# ---------------------------------------------------------------------
+# Pipeline helpers from Functions.pipeline_utils and Functions.si_utils.
+# ---------------------------------------------------------------------
 
-# ---------------------------------------------------------------------
-# Pipeline helpers from Functions.pipeline_utils and Functions.si_utils
-# ---------------------------------------------------------------------
+
+def filter_groups_by_channels(groups: Iterable[Iterable], valid_ids: Sequence) -> List[List]:
+    valid_set = set(valid_ids)
+    filtered: List[List] = []
+    for group in groups:
+        subset = [ch for ch in group if ch in valid_set]
+        if subset:
+            filtered.append(subset)
+    return filtered
+
+
+def filter_groups_with_indices(groups: Iterable[Iterable], valid_ids: Sequence) -> tuple[List[List], List[int]]:
+    valid_set = set(valid_ids)
+    filtered: List[List] = []
+    indices: List[int] = []
+    for idx, group in enumerate(groups):
+        subset = [ch for ch in group if ch in valid_set]
+        if subset:
+            filtered.append(subset)
+            indices.append(idx)
+    return filtered, indices
 
 
 def preprocess_for_sc2(recording, groups=None):
@@ -191,11 +210,11 @@ def preprocess_for_sc2(recording, groups=None):
             print(f"Preprocessing (SI): bandpass {SI_BP_MIN_HZ}-{SI_BP_MAX_HZ} Hz (no notch).")
 
         if SI_APPLY_CAR:
-            mode = (CAR_MODE or "tetrode").lower()
+            mode = (CAR_MODE or "group").lower()
             operator = (CAR_OPERATOR or "median").lower()
-            if mode == "tetrode" and groups:
+            if mode in ("group", "tetrode") and groups:
                 rec = spre.common_reference(rec, reference="global", operator=operator, groups=groups)
-                print(f"Preprocessing (SI): applied per-tetrode CAR ({operator}) on {len(groups)} tetrodes.")
+                print(f"Preprocessing (SI): applied per-group CAR ({operator}) on {len(groups)} groups.")
             else:
                 rec = spre.common_reference(rec, reference="global", operator=operator)
                 print(f"Preprocessing (SI): applied global CAR ({operator}).")
@@ -234,74 +253,16 @@ def preprocess_for_sc2(recording, groups=None):
     return rec
 
 
-def _attach_probe_from_group_layout(recording, group_prop, pitch=20.0, dx=150.0, dy=150.0):
-    group_prop = np.asarray(group_prop)
-    if group_prop.size != recording.get_num_channels():
-        raise ValueError("group property length mismatch")
-    unique_groups = sorted({int(g) for g in group_prop.tolist()})
-    if not unique_groups:
-        raise ValueError("no group ids available")
-    tetrodes_per_row = max(1, int(np.ceil(np.sqrt(len(unique_groups)))))
-    positions = np.zeros((group_prop.size, 2), dtype=float)
-    base = np.array([[0.0, 0.0], [pitch, 0.0], [0.0, pitch], [pitch, pitch]], dtype=float)
-    for idx, group_id in enumerate(unique_groups):
-        row = idx // tetrodes_per_row
-        col = idx % tetrodes_per_row
-        offset = np.array([col * dx, row * dy], dtype=float)
-        ch_idx = np.where(group_prop == group_id)[0]
-        for slot, ch_i in enumerate(ch_idx):
-            positions[ch_i] = offset + base[slot % 4]
-    from probeinterface import Probe
-
-    probe = Probe(ndim=2)
-    probe.set_contacts(positions=positions, shapes="circle", shape_params={"radius": 7})
-    probe.set_device_channel_indices(np.arange(recording.get_num_channels()))
-    return recording.set_probe(probe, in_place=False)
-
-
-def ensure_probe_for_analyzer(recording):
-    try:
-        if recording.get_probe() is not None:
-            return recording
-    except Exception:
-        pass
-    try:
-        recording = ensure_probe_attached(recording)
-        if recording.get_probe() is not None:
-            return recording
-    except Exception:
-        pass
-    try:
-        group_prop = recording.get_property("group")
-    except Exception:
-        group_prop = None
-    if group_prop is not None:
-        try:
-            return _attach_probe_from_group_layout(recording, group_prop)
-        except Exception:
-            pass
-    return recording
-
-
 def build_analyzer(sorting, recording, base_folder: Path, label: str):
     folder = base_folder / f"analyzer_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    recording = ensure_probe_for_analyzer(recording)
     try:
-        has_probe = recording.get_probe() is not None
-    except Exception:
-        has_probe = False
-    if has_probe:
+        recording = ensure_probe_attached(recording)
         print("Analyzer recording probe attached.")
-    else:
-        print("Warning: analyzer recording has no probe attached.")
-    analyzer = create_sorting_analyzer(
-        sorting=sorting,
-        recording=recording,
-        folder=folder,
-        overwrite=True,
-    )
-    analyzer.compute("random_spikes")
-    analyzer.compute("waveforms")
+    except Exception as exc:
+        print(f"Warning: failed to attach probe for analyzer: {exc}")
+    analyzer = create_sorting_analyzer(sorting=sorting, recording=recording, folder=folder, overwrite=True)
+    analyzer.compute({"random_spikes": {"max_spikes_per_unit": 500, "seed": 42}}, verbose=True)
+    analyzer.compute("waveforms", ms_before=1.5, ms_after=2.5, dtype="float32", verbose=True, n_jobs=4, chunk_duration="2s")
     analyzer.compute("templates")
     analyzer.compute("principal_components")
     print(f"Analyzer computed for {label} at {folder}")
@@ -310,9 +271,8 @@ def build_analyzer(sorting, recording, base_folder: Path, label: str):
 
 def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_index_map: dict, group_ids=None):
     folder = base_folder / f"phy_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    # copy_binary=True so Phy extracts snippets from the exported binary (scaled/bandpassed),
-    # instead of falling back to the raw recording on disk.
-    export_kwargs = dict(output_folder=folder, remove_if_exists=True, verbose=False, copy_binary=True)
+    # copy_binary=True so Phy extracts snippets from the exported binary, not the raw recording.
+    export_kwargs = dict(output_folder=folder, remove_if_exists=True, copy_binary=True)
     export_to_phy(analyzer, **export_kwargs)
     params_path = folder / "params.py"
 
@@ -346,18 +306,18 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
     )
     channel_map = np.arange(len(channel_ids_rec), dtype=np.int32)
 
-    # Build channel->group and slot lookup from the provided groups
-    ch_to_group = {}
-    ch_to_slot = {}
+    group_lookup = {}
+    slot_lookup = {}
+    group_sizes = {}
     group_ids = list(group_ids) if group_ids is not None else list(range(len(groups)))
-    if groups:
-        for gi, grp in enumerate(groups):
-            group_id = group_ids[gi] if gi < len(group_ids) else gi
-            for si, ch in enumerate(grp):
-                ch_to_group[ch] = group_id
-                ch_to_group[str(ch)] = group_id
-                ch_to_slot[ch] = si
-                ch_to_slot[str(ch)] = si
+    for g_idx, group in enumerate(groups):
+        group_id = group_ids[g_idx] if g_idx < len(group_ids) else g_idx
+        group_sizes[group_id] = len(group)
+        for slot, ch in enumerate(group):
+            group_lookup[ch] = group_id
+            group_lookup[str(ch)] = group_id
+            slot_lookup[ch] = (slot, len(group))
+            slot_lookup[str(ch)] = (slot, len(group))
 
     channel_groups_out = np.zeros(len(channel_ids_rec), dtype=np.int32)
     channel_shanks_out = np.zeros(len(channel_ids_rec), dtype=np.int32)
@@ -387,10 +347,27 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
         except Exception as exc:
             print(f"Warning: could not overwrite channel_map.npy: {exc}")
 
+    def lookup_group(ch, fallback=0):
+        if ch in group_lookup:
+            return int(group_lookup[ch])
+        ch_str = str(ch)
+        if ch_str in group_lookup:
+            return int(group_lookup[ch_str])
+        return int(fallback)
+
+    def lookup_slot(ch, group_id: int):
+        if ch in slot_lookup:
+            return slot_lookup[ch]
+        ch_str = str(ch)
+        if ch_str in slot_lookup:
+            return slot_lookup[ch_str]
+        size = group_sizes.get(group_id, 1)
+        return 0, size
+
     for idx, ch in enumerate(channel_ids_rec):
-        grp = ch_to_group.get(ch, ch_to_group.get(str(ch), 0))
-        channel_groups_out[idx] = int(grp)
-    channel_shanks_out = channel_groups_out.copy()
+        group_id = lookup_group(ch, 0)
+        channel_groups_out[idx] = group_id
+        channel_shanks_out[idx] = group_id
 
     if LINEARIZE_TRACEVIEW:
         contact_spacing = float(TRACEVIEW_CONTACT_SPACING_UM)
@@ -398,12 +375,12 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
         positions = np.zeros((len(channel_ids_rec), 2), dtype=np.float32)
 
         for idx, ch in enumerate(channel_ids_rec):
-            tetrode_idx = ch_to_group.get(ch, ch_to_group.get(str(ch), 0))
-            slot = ch_to_slot.get(ch, ch_to_slot.get(str(ch), 0))
-            col = slot % 2
-            row = slot // 2
+            group_id = lookup_group(ch, 0)
+            slot, gsize = lookup_slot(ch, group_id)
+            col = slot if gsize == 2 else slot % 2
+            row = 0 if gsize == 2 else slot // 2
             positions[idx, 0] = col * contact_spacing
-            positions[idx, 1] = tetrode_idx * group_spacing + row * contact_spacing + (slot * 1e-2)
+            positions[idx, 1] = group_id * group_spacing + row * contact_spacing + (slot * 1e-2)
 
         for name in ("channel_positions.npy", "channel_locations.npy"):
             try:
@@ -433,18 +410,21 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
         params_path.write_text(text)
 
     # Rebuild cluster-level channel group assignments for Phy.
+    cluster_channel_groups = None
     try:
-        template_ind_path = folder / "template_ind.npy"
-        if not template_ind_path.exists():
-            print("template_ind.npy not found; skipping cluster channel group recompute.")
-            return folder, group_unique
         spike_clusters = np.load(folder / "spike_clusters.npy")
         spike_templates = np.load(folder / "spike_templates.npy")
-        template_ind = np.load(template_ind_path)
+        template_ind_path = folder / "template_ind.npy"
+        template_ind = np.load(template_ind_path) if template_ind_path.exists() else None
         templates = np.load(folder / "templates.npy")
 
         peak_local = np.argmax(np.max(np.abs(templates), axis=1), axis=1)
-        peak_channels = template_ind[np.arange(template_ind.shape[0]), peak_local]
+        if template_ind is not None and template_ind.shape[0] == peak_local.shape[0]:
+            peak_channels = template_ind[np.arange(template_ind.shape[0]), peak_local]
+        else:
+            if template_ind is not None:
+                print("Warning: template_ind shape mismatch; using peak_local indices.")
+            peak_channels = peak_local
 
         n_clusters = int(spike_clusters.max()) + 1 if spike_clusters.size else 0
         cluster_channel_groups = np.zeros(n_clusters, dtype=int)
@@ -464,6 +444,27 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
     except Exception as exc:
         print(f"Warning: could not recompute cluster channel groups: {exc}")
 
+    # Optionally pre-label stereotrode clusters as MUA for Phy curation.
+    try:
+        if LABEL_STEREOTRODES_AS_MUA and cluster_channel_groups is not None:
+            stereotrode_groups = {
+                (group_ids[idx] if idx < len(group_ids) else idx)
+                for idx, g in enumerate(groups)
+                if len(g) <= 2
+            }
+            cluster_group_file = folder / "cluster_group.tsv"
+            with cluster_group_file.open("w", encoding="utf-8") as f:
+                f.write("cluster_id\tgroup\n")
+                for cid, group_val in enumerate(cluster_channel_groups):
+                    label_out = STEREOTRODE_MUA_LABEL if group_val in stereotrode_groups else DEFAULT_CLUSTER_LABEL
+                    f.write(f"{cid}\t{label_out}\n")
+            print(
+                f"Labeled stereotrode clusters as '{STEREOTRODE_MUA_LABEL}' in cluster_group.tsv "
+                f"({len(stereotrode_groups)} stereotrode groups)."
+            )
+    except Exception as exc:
+        print(f"Warning: could not label stereotrode clusters as MUA: {exc}")
+
     return folder, group_unique
 
 
@@ -482,7 +483,7 @@ def export_for_si_gui(analyzer, base_folder: Path, label: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SpykingCircus2 tetrode pipeline")
+    parser = argparse.ArgumentParser(description="SpykingCircus2 tetrode/stereotrode pipeline")
     parser.add_argument(
         "--root-dir",
         type=Path,
@@ -617,7 +618,7 @@ def main():
     if not base_groups:
         if STRICT_GROUPS:
             raise RuntimeError(
-                "No valid channel groups resolved. Provide CHANNEL_GROUPS or --channel-groups "
+                "No valid channel groups resolved. Provide CHANNEL_GROUPS/--channel-groups "
                 "and ensure channel IDs match the recording."
             )
         base_groups = chunk_groups(original_channel_order, CHANNELS_PER_TETRODE)
@@ -638,56 +639,47 @@ def main():
     if cli_bad_loaded is not None:
         bad_channels = cli_bad_loaded
         bad_source = f"CLI file {args.bad_channels}"
-    print(f"Bad channels source: {bad_source}")
 
     manual_bad = resolve_bad_channel_ids(recording, bad_channels)
     auto_bad = detect_bad_channel_ids(recording, AUTO_BAD_CHANNELS)
-    # Sort for readability
     auto_bad_sorted = np.sort(auto_bad)
+    print(f"Bad channels source: {bad_source}")
     if AUTO_BAD_CHANNELS:
         print(f"Auto-detected bad channels ({auto_bad.size}): {auto_bad_sorted.tolist()}")
     else:
         if auto_bad.size:
             print(f"Note: AUTO_BAD_CHANNELS disabled, ignoring detected list: {auto_bad_sorted.tolist()}")
 
-    # Normalize bad channel IDs to the same dtype as recording.channel_ids before slicing.
+    # Normalize bad channel IDs to the same dtype as the recording channel_ids.
     channel_dtype = np.asarray(channel_order).dtype if channel_order else object
     bad_arrays = [np.array(arr, dtype=channel_dtype) for arr in (manual_bad, auto_bad) if arr.size]
     if bad_arrays:
         bad_ids = np.unique(np.concatenate(bad_arrays))
-        # Report indices in original order for reference
-        bad_indices = sorted([original_index_map[str(ch)] for ch in bad_ids if str(ch) in original_index_map])
-        print(f"Removed {len(bad_ids)} bad channels: {bad_ids.tolist()}")
-        print(f"Removed indices in original order: {bad_indices}")
         keep_ids = [ch for ch in channel_order if ch not in bad_ids]
         recording = safe_channel_slice(recording, keep_ids)
         channel_order = keep_ids
+        print(f"Removed {len(bad_ids)} bad channels: {bad_ids.tolist()}")
     else:
         channel_order = original_channel_order.copy()
 
-    # Preserve original tetrode grid positions even if some tetrodes are fully removed.
-    base_tetrode_count = len(base_groups)
-    filtered_groups = []
-    filtered_indices = []
-    for idx, grp in enumerate(base_groups):
-        subset = [ch for ch in grp if ch in channel_order]
-        if subset:
-            filtered_groups.append(subset)
-            filtered_indices.append(idx)
-    groups = filtered_groups
-    # Preserve original tetrode indices for group labels after bad-channel removal (non-contiguous IDs are expected).
+    groups, filtered_indices = filter_groups_with_indices(base_groups, channel_order)
+    # Preserve original group indices for labels after bad-channel removal (non-contiguous IDs are expected).
     group_ids = filtered_indices.copy() if filtered_indices else list(range(len(groups)))
+    for idx, group in enumerate(groups):
+        if len(group) <= 2:
+            print(f"Warning: group {idx} has {len(group)} channel(s) after bad-channel removal; treating as small-group/MUA.")
     if manual_groups:
-        print(f"Tetrodes kept: {len(groups)} (source: {groups_source}); first group: {groups[0] if groups else 'n/a'}")
+        print(f"Groups: {len(groups)} (source: {groups_source}); first group: {groups[0] if groups else 'n/a'}")
     else:
-        print(f"Tetrodes kept: {len(groups)} (fallback chunking); first group: {groups[0] if groups else 'n/a'}")
+        print(f"Groups: {len(groups)} (fallback chunking); first group: {groups[0] if groups else 'n/a'}")
 
     tetrode_offsets = None
-    tetrodes_per_row = max(1, int(np.ceil(np.sqrt(base_tetrode_count)))) if base_tetrode_count else 1
+    base_group_count = len(base_groups)
+    tetrodes_per_row = max(1, int(np.ceil(np.sqrt(base_group_count)))) if base_group_count else 1
     if groups:
         dx = 150.0
         dy = 150.0
-        num_rows = int(np.ceil(base_tetrode_count / tetrodes_per_row))
+        num_rows = int(np.ceil(base_group_count / tetrodes_per_row))
         tetrode_offsets = []
         for orig_idx in filtered_indices:
             row = orig_idx // tetrodes_per_row
@@ -706,17 +698,17 @@ def main():
         )
         print(f"Geometry attached to recording (tetrodes_per_row={tetrodes_per_row}).")
 
-    # Optional SI common median reference before SC2 (per tetrode or global) when not using SI preprocessing
+    # Optional SI common median reference before SC2 (per group or global) when not using SI preprocessing
     if not USE_SI_PREPROCESS and SI_APPLY_CAR:
         try:
-            mode = (CAR_MODE or "tetrode").lower()
+            mode = (CAR_MODE or "group").lower()
             operator = (CAR_OPERATOR or "median").lower()
-            if mode == "tetrode" and groups:
+            if mode in ("group", "tetrode") and groups:
                 # SpikeInterface uses reference="global" with groups to mean per-group CAR.
                 recording = spre.common_reference(
                     recording, reference="global", operator=operator, groups=groups
                 )
-                print(f"Applied SI per-tetrode CAR ({operator}) on {len(groups)} tetrodes.")
+                print(f"Applied SI per-group CAR ({operator}) on {len(groups)} groups.")
             else:
                 recording = spre.common_reference(recording, reference="global", operator=operator)
                 print(f"Applied SI global CAR ({operator}).")
@@ -726,7 +718,6 @@ def main():
     rec_sc2 = preprocess_for_sc2(recording, groups=groups)
 
     if ATTACH_GEOMETRY and groups:
-        # Re-attach geometry after preprocessing in case properties/probe were dropped.
         rec_sc2 = ensure_geom_and_units(
             rec_sc2,
             groups,
@@ -740,7 +731,7 @@ def main():
         except Exception as exc:
             print(f"Warning: failed to attach probe to rec_sc2: {exc}")
 
-    # Optionally use a scaled, bandpassed (non-whitened) copy for Phy/export so snippets are not raw.
+    # Optionally use a scaled, bandpassed copy for Phy/export so snippets are not raw.
     rec_export = recording
     export_scale = EXPORT_SCALE_TO_UV
     if export_scale:
@@ -789,13 +780,12 @@ def main():
             margin_ms=EXPORT_BP_MARGIN_MS,
         )
         print(f"Export path: bandpass {EXPORT_BP_MIN_HZ}-{EXPORT_BP_MAX_HZ} Hz for Phy/GUI export.")
-    # Ensure group labels are on the export recording for downstream tools
     set_group_property(rec_export, groups, group_ids)
 
     sc2_run = SC2_OUT / f"sc2_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     safe_rmtree(sc2_run)
 
-    set_group_property(rec_sc2, groups, group_ids)  # stores tetrode index as 'group' property for downstream tools
+    set_group_property(rec_sc2, groups, group_ids)
     sc2_params = merge_params(ss.Spykingcircus2Sorter.default_params(), SC2_PARAM_OVERRIDES)
     if USE_SI_PREPROCESS:
         sc2_params["apply_preprocessing"] = False

@@ -34,7 +34,7 @@ def discover_oe_stream_names(folder):
 
 
 def attach_geom(recording, groups, tetrodes_per_row=None, pitch=20.0, dx=150.0, dy=150.0, tetrode_offsets=None):
-    """Attach a Probe with simple 2×2 tetrode layout."""
+    """Attach a Probe with simple 2x2 tetrode layout."""
     groups = list(groups)
     if tetrode_offsets is not None and len(tetrode_offsets) != len(groups):
         raise ValueError("tetrode_offsets must match number of tetrodes")
@@ -62,19 +62,40 @@ def attach_geom(recording, groups, tetrodes_per_row=None, pitch=20.0, dx=150.0, 
     return recording.set_probe(probe)
 
 
-def set_group_property(recording, groups):
-    """Store the tetrode index as a channel property named 'group'."""
+def set_group_property(recording, groups, group_ids=None):
+    """Store a group label as a channel property named 'group' (labels may be non-contiguous)."""
+    if group_ids is None:
+        group_ids = list(range(len(groups)))
+    elif len(group_ids) != len(groups):
+        raise ValueError("group_ids must match number of groups")
     index_map = {ch: i for i, ch in enumerate(recording.channel_ids)}
     values = np.zeros(len(recording.channel_ids), dtype=int)
-    for group_index, group in enumerate(groups):
+    for group_label, group in zip(group_ids, groups):
         for ch in group:
             if ch in index_map:
-                values[index_map[ch]] = group_index
+                values[index_map[ch]] = int(group_label)
     recording.set_property("group", values)
 
 
+def ensure_probe_attached(recording, radius=5):
+    """Attach a Probe object if missing (uses channel locations)."""
+    try:
+        if recording.get_probe() is not None:
+            return recording
+    except Exception:
+        pass
+    try:
+        locs = recording.get_channel_locations()
+    except Exception as exc:
+        raise RuntimeError(f"Cannot attach probe: channel locations unavailable ({exc})")
+    probe = Probe(ndim=locs.shape[1])
+    probe.set_contacts(positions=locs, shapes="circle", shape_params={"radius": radius})
+    probe.set_device_channel_indices(np.arange(recording.get_num_channels()))
+    return recording.set_probe(probe, in_place=False)
+
+
 def ensure_geom_and_units(recording, groups, tetrodes_per_row=None, scale_to_uv=True, tetrode_offsets=None):
-    """Re-attach geometry and ensure data are expressed in microvolts."""
+    """Attach geometry and check for gain_to_uV metadata; does not rescale traces."""
     rec = attach_geom(recording, groups, tetrodes_per_row, tetrode_offsets=tetrode_offsets)
     if scale_to_uv:
         try:
@@ -82,36 +103,14 @@ def ensure_geom_and_units(recording, groups, tetrodes_per_row=None, scale_to_uv=
         except Exception:
             gain = None
         if gain is None:
-            rec = spre.scale(rec, gain=1e6)
+            print("Warning: gain_to_uV missing; leaving recording in native units.")
     return rec
-
-
-def reorder_recording_by_locations(recording):
-    """Return a reordered view sorted by channel position (top-to-bottom)."""
-    locations = recording.get_channel_locations()
-    channel_ids = list(recording.channel_ids)
-    order = np.lexsort((locations[:, 0], locations[:, 1]))
-    ordered_ids = [channel_ids[idx] for idx in order]
-
-    channel_slice = getattr(recording, "channel_slice", None)
-    if callable(channel_slice):
-        probe = recording.get_probe() if getattr(recording, "has_probe", lambda: False)() else None
-        reordered = channel_slice(keep_channel_ids=ordered_ids)
-        if probe is not None and not getattr(reordered, "has_probe", lambda: False)():
-            try:
-                reordered = reordered.set_probe(probe)
-            except Exception:
-                pass
-        return reordered
-
-    print("Warning: recording does not support channel_slice; keeping original order.")
-    return recording
 
 
 __all__ = [
     "discover_oe_stream_names",
     "attach_geom",
     "set_group_property",
+    "ensure_probe_attached",
     "ensure_geom_and_units",
-    "reorder_recording_by_locations",
 ]
