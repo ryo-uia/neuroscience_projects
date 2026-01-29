@@ -39,6 +39,11 @@ def attach_geom(recording, groups, tetrodes_per_row=None, pitch=20.0, dx=150.0, 
     if tetrode_offsets is not None and len(tetrode_offsets) != len(groups):
         raise ValueError("tetrode_offsets must match number of tetrodes")
 
+    assigned = {ch for grp in groups for ch in grp}
+    missing = [ch for ch in recording.channel_ids if ch not in assigned]
+    if missing:
+        print(f"Warning: {len(missing)} channels not present in groups (first: {missing[:5]})")
+
     index_map = {ch: i for i, ch in enumerate(recording.channel_ids)}
     positions = np.zeros((len(index_map), 2), dtype=float)
 
@@ -53,13 +58,15 @@ def attach_geom(recording, groups, tetrodes_per_row=None, pitch=20.0, dx=150.0, 
             row, col = divmod(tetrode, tetrodes_per_row)
             offset = np.array([col * dx, row * dy], dtype=float)
         for j, ch in enumerate(group):
+            if ch not in index_map:
+                print(f"Warning: channel {ch} missing from recording; skipping geometry assignment.")
+                continue
             positions[index_map[ch]] = base[j] + offset
 
     probe = Probe(ndim=2)
     probe.set_contacts(positions=positions, shapes="circle", shape_params={"radius": 7})
-    device_idx = np.array([index_map[ch] for ch in recording.channel_ids], dtype=int)
-    probe.set_device_channel_indices(device_idx)
-    return recording.set_probe(probe)
+    probe.set_device_channel_indices(np.arange(recording.get_num_channels()))
+    return recording.set_probe(probe, in_place=False)
 
 
 def set_group_property(recording, groups, group_ids=None):
@@ -69,12 +76,16 @@ def set_group_property(recording, groups, group_ids=None):
     elif len(group_ids) != len(groups):
         raise ValueError("group_ids must match number of groups")
     index_map = {ch: i for i, ch in enumerate(recording.channel_ids)}
-    values = np.zeros(len(recording.channel_ids), dtype=int)
+    values = np.full(len(recording.channel_ids), fill_value=-1, dtype=int)
     for group_label, group in zip(group_ids, groups):
         for ch in group:
             if ch in index_map:
                 values[index_map[ch]] = int(group_label)
     recording.set_property("group", values)
+    if np.any(values == -1):
+        missing_idx = np.where(values == -1)[0]
+        missing_ch = [recording.channel_ids[i] for i in missing_idx[:10]]
+        print(f"Warning: unassigned channels in group property (examples: {missing_ch})")
 
 
 def ensure_probe_attached(recording, radius=5):
@@ -98,12 +109,19 @@ def ensure_geom_and_units(recording, groups, tetrodes_per_row=None, scale_to_uv=
     """Attach geometry and check for gain_to_uV metadata; does not rescale traces."""
     rec = attach_geom(recording, groups, tetrodes_per_row, tetrode_offsets=tetrode_offsets)
     if scale_to_uv:
+        gain = None
         try:
             gain = rec.get_property("gain_to_uV")
         except Exception:
             gain = None
         if gain is None:
-            print("Warning: gain_to_uV missing; leaving recording in native units.")
+            # Fall back to channel gains if available (metadata only; no rescaling here).
+            try:
+                gain = rec.get_channel_gains()
+            except Exception:
+                gain = None
+        if gain is None:
+            print("Warning: gain_to_uV/gains missing; leaving recording in native units.")
     return rec
 
 

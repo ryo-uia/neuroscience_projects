@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import time
 from copy import deepcopy
@@ -22,9 +23,31 @@ def pick_stream(data_path: Path, preferred: str | None) -> str:
     neural = [n for n in names if "ADC" not in n and "SYNC" not in n]
     if not neural:
         raise RuntimeError("No neural streams found; set STREAM_NAME manually.")
-    print("Available streams:")
-    for idx, name in enumerate(names):
-        print(f"  [{idx}] {name}")
+    if len(neural) > 1:
+        print("Available streams:")
+        for idx, name in enumerate(names):
+            print(f"  [{idx}] {name}")
+        default_idx = names.index(neural[0])
+        prompt = f"Select stream index [default {default_idx}]: "
+        try:
+            choice = input(prompt).strip()
+        except EOFError:
+            choice = ""
+        if choice:
+            try:
+                pick = int(choice)
+                if 0 <= pick < len(names):
+                    chosen = names[pick]
+                else:
+                    print(f"Stream index {pick} out of range; using default.")
+                    chosen = neural[0]
+            except ValueError:
+                print("Invalid selection; using default.")
+                chosen = neural[0]
+        else:
+            chosen = neural[0]
+        print(f"Using stream: {chosen}")
+        return chosen
     return neural[0]
 
 
@@ -67,9 +90,21 @@ def chunk_groups(channel_ids: Iterable, size: int = 4) -> List[List]:
     return [ids[i : i + size] for i in range(0, len(ids), size)]
 
 
+def _is_empty_sequence(value) -> bool:
+    if value is None:
+        return True
+    try:
+        return len(value) == 0
+    except TypeError:
+        try:
+            return np.asarray(value).size == 0
+        except Exception:
+            return False
+
+
 def resolve_manual_groups(recording, manual_groups: Sequence[Sequence[int | str]]) -> List[List]:
     """Resolve user-specified channel groups to recording channel_ids."""
-    if not manual_groups:
+    if _is_empty_sequence(manual_groups):
         return []
 
     channel_ids = list(recording.channel_ids)
@@ -105,6 +140,15 @@ def resolve_manual_groups(recording, manual_groups: Sequence[Sequence[int | str]
                     candidate = channel_ids[as_int]
             elif isinstance(item, str) and item in name_to_id:
                 candidate = name_to_id[item]
+            elif isinstance(item, str):
+                # Try common "CH##" style labels even if channel_name property is missing.
+                match = re.match(r"^[A-Za-z]*?(\d+)$", item)
+                if match:
+                    as_int = int(match.group(1))
+                    if as_int in id_set:
+                        candidate = as_int
+                    elif 0 <= as_int < len(channel_ids):
+                        candidate = channel_ids[as_int]
 
             if candidate is None:
                 print(f"Warning: could not resolve channel '{item}' in CHANNEL_GROUPS[{g_idx}]")
@@ -115,6 +159,9 @@ def resolve_manual_groups(recording, manual_groups: Sequence[Sequence[int | str]
             seen.add(candidate)
         if resolved:
             resolved_groups.append(resolved)
+    flat = [ch for grp in resolved_groups for ch in grp]
+    if len(flat) != len(set(flat)):
+        print("Warning: some channels appear in multiple groups.")
     return resolved_groups
 
 
@@ -148,6 +195,9 @@ def load_bad_channels_from_path(path: Path | None) -> list | None:
     try:
         data = json.loads(p.read_text())
         if isinstance(data, (list, tuple)):
+            if len(data) == 0:
+                print(f"Warning: bad-channels file is empty: {p} (using inline BAD_CHANNELS)")
+                return None
             return list(data)
         print(f"Warning: expected list of channel IDs in {p}")
     except Exception as exc:
@@ -156,7 +206,7 @@ def load_bad_channels_from_path(path: Path | None) -> list | None:
 
 
 def resolve_bad_channel_ids(recording, manual_list: Sequence[int | str]) -> np.ndarray:
-    if not manual_list:
+    if _is_empty_sequence(manual_list):
         return np.array([], dtype=object)
 
     channel_ids = list(recording.channel_ids)
@@ -177,19 +227,33 @@ def resolve_bad_channel_ids(recording, manual_list: Sequence[int | str]) -> np.n
         if isinstance(item, (int, np.integer)):
             if item in id_set:
                 resolved.append(item)
-            elif 0 <= int(item) < len(channel_ids):
+                continue
+            if 0 <= int(item) < len(channel_ids):
                 resolved.append(channel_ids[int(item)])
-            else:
-                print(f"Warning: could not resolve bad channel '{item}'")
-        elif isinstance(item, str):
+                continue
+            print(f"Warning: could not resolve bad channel '{item}'")
+            continue
+
+        if isinstance(item, str):
             if item in id_set:
                 resolved.append(item)
-            elif item in name_to_id:
+                continue
+            if item in name_to_id:
                 resolved.append(name_to_id[item])
-            else:
-                print(f"Warning: could not resolve bad channel '{item}'")
-        else:
+                continue
+            match = re.match(r"^[A-Za-z]*?(\d+)$", item)
+            if match:
+                as_int = int(match.group(1))
+                if as_int in id_set:
+                    resolved.append(as_int)
+                    continue
+                if 0 <= as_int < len(channel_ids):
+                    resolved.append(channel_ids[as_int])
+                    continue
             print(f"Warning: could not resolve bad channel '{item}'")
+            continue
+
+        print(f"Warning: could not resolve bad channel '{item}'")
 
     if not resolved:
         return np.array([], dtype=object)
@@ -203,11 +267,17 @@ def resolve_bad_channel_ids(recording, manual_list: Sequence[int | str]) -> np.n
     return np.array(unique, dtype=object)
 
 
-def detect_bad_channel_ids(recording, enabled: bool) -> np.ndarray:
+def detect_bad_channel_ids(recording, enabled: bool, method: str | None = None, **kwargs) -> np.ndarray:
     if not enabled:
         return np.array([], dtype=object)
     try:
-        detected = spre.detect_bad_channels(recording)
+        if method is not None:
+            try:
+                detected = spre.detect_bad_channels(recording, method=method, **kwargs)
+            except TypeError:
+                detected = spre.detect_bad_channels(recording, **kwargs)
+        else:
+            detected = spre.detect_bad_channels(recording, **kwargs)
     except Exception as exc:
         print(f"Auto bad-channel detection failed: {exc}")
         return np.array([], dtype=object)
@@ -219,7 +289,7 @@ def detect_bad_channel_ids(recording, enabled: bool) -> np.ndarray:
             detected_arr = np.asarray(recording.channel_ids, dtype=object)[detected_arr]
         else:
             detected_arr = np.array([], dtype=object)
-    return np.array(detected_arr, dtype=object)
+    return np.array(detected_arr, dtype=np.asarray(recording.channel_ids).dtype)
 
 
 def merge_params(defaults: dict, overrides: dict) -> dict:

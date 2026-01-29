@@ -21,6 +21,14 @@ import spikeinterface.preprocessing as spre
 import spikeinterface.sorters as ss
 from spikeinterface.core import create_sorting_analyzer
 from spikeinterface.exporters import export_to_phy
+try:
+    import spikeinterface.curation as sc
+except Exception:
+    sc = None
+try:
+    from spikeinterface.qualitymetrics import compute_quality_metrics
+except Exception:
+    compute_quality_metrics = None
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -62,12 +70,34 @@ SI_GUI_OUT = None
 EXPORT_TO_PHY = True
 EXPORT_TO_SI_GUI = False
 EXPORT_PHY_EXTRACT_WAVEFORMS = False  # run `phy extract-waveforms` to precompute Phy waveforms (UI speed only; requires Phy CLI)
+SIMPLE_PHY_EXPORT = None  # auto: follows SORT_BY_GROUP; set True/False to override
+EXPORT_PHY_CHANNEL_IDS_MODE = "oe_label"  # "oe_index"=OE numeric IDs (0-based, gaps after removals), "oe_label"=CH## labels, "as_exported"=compact 0..N-1
+MATERIALIZE_EXPORT = False  # save rec_export to disk before analyzer/export (faster reuse; uses extra space)
+
+# Analyzer/QC
+COMPUTE_QC_METRICS = True  # compute QC metrics on analyzer output
+QC_METRIC_NAMES = [
+    "firing_rate",
+    "presence_ratio",
+    "isi_violation",
+    "snr",
+    "amplitude_cutoff",
+]
+QC_PC_METRICS = {
+    "isolation_distance",
+    "l_ratio",
+    "d_prime",
+    "nearest_neighbor",
+    "nn_isolation",
+    "nn_noise_overlap",
+    "silhouette",
+}
 
 # Channel grouping (tetrodes)
 CHANNELS_PER_TETRODE = 4
 # Optional explicit channel grouping. If set, this fixed map is used instead of chunking by order
 # (prevents shifts after bad-channel removal).
-CHANNEL_GROUPS = [
+CHANNEL_GROUPS: list[list[int | str]] = [
     ["CH40", "CH38", "CH36", "CH34"],  # TT1A-D
     ["CH48", "CH46", "CH44", "CH42"],  # TT2A-D
     ["CH56", "CH54", "CH52", "CH50"],  # TT3A-D
@@ -87,11 +117,15 @@ CHANNEL_GROUPS = [
 ]
 CHANNEL_GROUPS_PATH = None  # optional JSON file path or env SPIKESORT_CHANNEL_GROUPS
 STRICT_GROUPS = True  # error out if no valid groups can be resolved (recommended for tetrodes)
+SORT_BY_GROUP = False  # when True, run SC2 separately per tetrode group (one sorter/export per group)
 
 # Bad channels (use IDs to avoid positional mismatch across sessions or after slicing)
-BAD_CHANNELS = ["CH63", "CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"]
+BAD_CHANNELS = ["CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"] #Tatsu
+#BAD_CHANNELS = ["CH58", "CH64", "CH62", "CH60", "CH63", "CH61", "CH59", "CH57", "CH47", "CH45", "CH43", "CH41"] #Fuyu
 BAD_CHANNELS_PATH = None  # optional JSON file path or env SPIKESORT_BAD_CHANNELS
 AUTO_BAD_CHANNELS = False  # auto-detect bad channels (merged with manual list; can be aggressive)
+AUTO_BAD_CHANNELS_METHOD = "std"  # "std" or "mad" are typical for tetrodes
+AUTO_BAD_CHANNELS_KWARGS = {}  # extra args passed to detect_bad_channels
 
 # Geometry/traceview display
 ATTACH_GEOMETRY = True
@@ -101,12 +135,14 @@ TRACEVIEW_GROUP_SPACING_UM = 200.0
 
 # Optional SI preprocessing: bandpass (+ optional notch/CAR/whitening).
 # When enabled, SC2 filtering/CMR are disabled, but SC2 still whitens internally.
-USE_SI_PREPROCESS = False
-SI_BP_MIN_HZ = 150
-SI_BP_MAX_HZ = 7000
+# OE raw data are typically int16; SI scaling/filtering/whitening outputs float32.
+USE_SI_PREPROCESS = True
+SI_BP_MIN_HZ = 300
+SI_BP_MAX_HZ = 6000
 SI_BP_FTYPE = "bessel"
 SI_BP_ORDER = 2
 SI_BP_MARGIN_MS = 10
+MATERIALIZE_SI_PREPROCESS = False  # save preprocessed rec_sc2 to disk (faster reuse; uses extra space)
 
 SI_APPLY_WHITEN = False  # only applies when USE_SI_PREPROCESS=True; SC2 whitening still runs (double-whitening)
 SI_WHITEN_MODE = "local"  # "global" or "local"
@@ -129,18 +165,24 @@ NOTCH_FREQUENCIES = [50, 100, 150]
 NOTCH_Q = 30
 
 # Optional bandpass copy for Phy/export (useful when SC2 preprocessing is enabled so Phy doesn't read raw).
-EXPORT_BANDPASS_FOR_PHY = True
+# Common practice: Phy export is scaled + optionally bandpassed, but not whitened.
+EXPORT_BANDPASS_FOR_PHY = True  # set True for bandpassed export; False exports raw for comparison
 EXPORT_BP_MIN_HZ = SI_BP_MIN_HZ
 EXPORT_BP_MAX_HZ = SI_BP_MAX_HZ
 EXPORT_BP_FTYPE = SI_BP_FTYPE
 EXPORT_BP_ORDER = SI_BP_ORDER
 EXPORT_BP_MARGIN_MS = SI_BP_MARGIN_MS
 EXPORT_SCALE_TO_UV = True  # scale export recording to microvolts if gain info is present
+ANALYZER_FROM_SORTER = True  # use rec_sc2 for analyzer/QC (more faithful to sorter input)
+SAVE_ANALYZER = False  # persist analyzer to disk (binary_folder); set True for full runs
+REMOVE_REDUNDANT_UNITS = False  # optional post-sort curation step (remove near-duplicate units)
+REDUNDANT_THRESHOLD = 0.95  # higher = stricter duplicate detection
+REDUNDANT_STRATEGY = "minimum_shift"  # curation strategy for duplicates
 
 # Optional overrides for SpykingCircus2 parameters (keys mirror default params structure)
 # Add tweaks here if you need to change SC2 defaults (filtering, thresholds, etc.).
 SC2_PARAM_OVERRIDES = {
-    # Example: disable SC2 filtering when using SI preprocessing
+     # Example: disable SC2 filtering when using SI preprocessing
     # "preprocessing": {
     #     "apply": False,
     # },
@@ -149,6 +191,22 @@ SC2_PARAM_OVERRIDES = {
     #     "peak_sign": "both",
     #     "relative_threshold": 5.0,
     # },
+
+    # Tetrodes: disable motion correction (intended for dense probes).
+    "apply_motion_correction": False,
+    # Match native SC2 waveform window (N_t = 3 ms total).
+    "general": {
+        "ms_before": 1.0,
+        "ms_after": 2.0,
+    },
+    # Match native SC2 detection threshold and peak sign.
+    "detection": {
+        "method": "matched_filtering",
+        "method_kwargs": {
+            "peak_sign": "neg",
+            "detect_threshold": 6,
+        },
+    },
 }
 
 # Optional: print stack traces for warnings (debug-only).
@@ -167,6 +225,8 @@ def enable_warning_trace(limit: int = 12) -> None:
 # ---------------------------------------------------------------------
 # Pipeline helpers from Functions.pipeline_utils and Functions.si_utils
 # ---------------------------------------------------------------------
+
+
 
 
 def preprocess_for_sc2(recording, groups=None):
@@ -283,7 +343,14 @@ def ensure_probe_for_analyzer(recording):
     return recording
 
 
-def build_analyzer(sorting, recording, base_folder: Path, label: str):
+def build_analyzer(
+    sorting,
+    recording,
+    base_folder: Path,
+    label: str,
+    wf_ms_before: float | None = None,
+    wf_ms_after: float | None = None,
+):
     folder = base_folder / f"analyzer_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     recording = ensure_probe_for_analyzer(recording)
     try:
@@ -294,17 +361,99 @@ def build_analyzer(sorting, recording, base_folder: Path, label: str):
         print("Analyzer recording probe attached.")
     else:
         print("Warning: analyzer recording has no probe attached.")
+    analyzer_format = "binary_folder" if SAVE_ANALYZER else "memory"
+    if SAVE_ANALYZER:
+        folder.mkdir(parents=True, exist_ok=True)
     analyzer = create_sorting_analyzer(
         sorting=sorting,
         recording=recording,
+        format=analyzer_format,
         folder=folder,
         overwrite=True,
     )
     analyzer.compute("random_spikes")
-    analyzer.compute("waveforms")
+    wf_kwargs = {}
+    if wf_ms_before is not None:
+        wf_kwargs["ms_before"] = wf_ms_before
+    if wf_ms_after is not None:
+        wf_kwargs["ms_after"] = wf_ms_after
+    analyzer.compute("waveforms", **wf_kwargs) if wf_kwargs else analyzer.compute("waveforms")
     analyzer.compute("templates")
     analyzer.compute("principal_components")
+    if COMPUTE_QC_METRICS:
+        qc_done = False
+        try:
+            try:
+                analyzer.compute("noise_levels")
+            except Exception as exc:
+                print(f"Warning: noise_levels failed: {exc}")
+            skip_pc = not any(name in QC_PC_METRICS for name in QC_METRIC_NAMES)
+            try:
+                analyzer.compute(
+                    "quality_metrics",
+                    metric_names=QC_METRIC_NAMES,
+                    skip_pc_metrics=skip_pc,
+                )
+            except TypeError:
+                analyzer.compute("quality_metrics", metric_names=QC_METRIC_NAMES)
+            try:
+                qm = analyzer.get_extension("quality_metrics").get_data()
+            except Exception:
+                qm = None
+            if qm is not None:
+                print("QC metrics computed via analyzer extension.")
+                out_path = Path(analyzer.folder) / "qc_metrics.csv" if analyzer.folder else (folder / "qc_metrics.csv")
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    qm.to_csv(out_path)
+                    print(f"QC metrics saved: {out_path}")
+                except Exception as exc:
+                    print(f"Warning: QC metrics save failed: {exc}")
+                qc_done = True
+            else:
+                print("QC metrics computed (extension) but no data returned.")
+        except Exception:
+            pass
+        if not qc_done:
+            if compute_quality_metrics is None:
+                print("Warning: QC metrics unavailable; skipping quality metrics.")
+            else:
+                try:
+                    try:
+                        analyzer.compute("noise_levels")
+                    except Exception:
+                        pass
+                    qm = compute_quality_metrics(analyzer, metric_names=QC_METRIC_NAMES)
+                    print("QC metrics computed via compute_quality_metrics fallback.")
+                    out_path = Path(analyzer.folder) / "qc_metrics.csv" if analyzer.folder else (folder / "qc_metrics.csv")
+                    try:
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        qm.to_csv(out_path)
+                        print(f"QC metrics saved: {out_path}")
+                    except Exception as exc:
+                        print(f"Warning: QC metrics save failed: {exc}")
+                except Exception as exc:
+                    print(f"Warning: QC metrics failed: {exc}")
     print(f"Analyzer computed for {label} at {folder}")
+    return analyzer
+
+
+def maybe_remove_redundant_units(analyzer, label: str):
+    if not REMOVE_REDUNDANT_UNITS:
+        return analyzer
+    if sc is None:
+        print("Warning: spikeinterface.curation unavailable; skipping redundant-unit removal.")
+        return analyzer
+    try:
+        clean_sorting = sc.remove_redundant_units(
+            analyzer,
+            duplicate_threshold=REDUNDANT_THRESHOLD,
+            remove_strategy=REDUNDANT_STRATEGY,
+        )
+        analyzer = analyzer.select_units(clean_sorting.unit_ids)
+        print(f"Redundant units removed for {label} (threshold={REDUNDANT_THRESHOLD}).")
+    except Exception as exc:
+        print(f"Warning: redundant-unit removal failed for {label}: {exc}")
     return analyzer
 
 
@@ -314,6 +463,10 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
     # instead of falling back to the raw recording on disk.
     export_kwargs = dict(output_folder=folder, remove_if_exists=True, verbose=False, copy_binary=True)
     export_to_phy(analyzer, **export_kwargs)
+    simple_flag = SORT_BY_GROUP if SIMPLE_PHY_EXPORT is None else SIMPLE_PHY_EXPORT
+    simple_export = simple_flag and groups is not None and len(groups) <= 1
+    if simple_export and EXPORT_PHY_CHANNEL_IDS_MODE == "as_exported":
+        return folder, None
     params_path = folder / "params.py"
 
     cache_dir = folder / ".phy"
@@ -338,12 +491,35 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
             return int(original_index_map[ch_str])
         return int(fallback)
 
+    if EXPORT_PHY_CHANNEL_IDS_MODE not in ("oe_index", "oe_label", "as_exported"):
+        print(
+            f"Warning: EXPORT_PHY_CHANNEL_IDS_MODE={EXPORT_PHY_CHANNEL_IDS_MODE!r} is invalid; "
+            "falling back to 'oe_index'."
+        )
+        EXPORT_PHY_CHANNEL_IDS_MODE_LOCAL = "oe_index"
+    else:
+        EXPORT_PHY_CHANNEL_IDS_MODE_LOCAL = EXPORT_PHY_CHANNEL_IDS_MODE
+
+    if EXPORT_PHY_CHANNEL_IDS_MODE_LOCAL == "oe_label":
+        labels = None
+        try:
+            if "channel_name" in analyzer.recording.get_property_keys():
+                labels = list(analyzer.recording.get_property("channel_name"))
+        except Exception:
+            labels = None
+        if not labels:
+            labels = [str(ch) for ch in channel_ids_rec]
+        channel_ids_out = np.array(labels, dtype=str)
+        channel_ids_text = f"channel_ids = np.array({labels!r}, dtype=str)"
+    else:
     # Phy uses channel_map for compact 0..N-1 ordering in the exported binary (shifts after removals),
-    # and channel_ids for labels; we keep channel_ids as original OE indices so gaps indicate dropped channels.
-    channel_indices = np.array(
-        [lookup_index(ch, idx) for idx, ch in enumerate(channel_ids_rec)],
-        dtype=np.int32,
-    )
+    # and channel_ids for labels; here "OE indices" means the index in the original recording.channel_ids
+    # order (after any slicing), not necessarily the physical hardware channel number.
+        channel_ids_out = np.array(
+            [lookup_index(ch, idx) for idx, ch in enumerate(channel_ids_rec)],
+            dtype=np.int32,
+        )
+        channel_ids_text = f"channel_ids = np.array({channel_ids_out.tolist()}, dtype=np.int32)"
     channel_map = np.arange(len(channel_ids_rec), dtype=np.int32)
 
     # Build channel->group and slot lookup from the provided groups
@@ -369,14 +545,16 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
             text = "import numpy as np\n" + text
 
         pattern_ids = re.compile(r"channel_ids\s*=.*")
-        replacement_ids = f"channel_ids = np.array({channel_indices.tolist()}, dtype=np.int32)"
-        text, count_ids = pattern_ids.subn(replacement_ids, text, count=1)
+        text, count_ids = pattern_ids.subn(channel_ids_text, text, count=1)
         if not count_ids:
-            text += f"\n{replacement_ids}\n"
+            text += f"\n{channel_ids_text}\n"
         try:
-            np.save(folder / "channel_ids.npy", channel_indices.astype(np.int32))
+            np.save(folder / "channel_ids.npy", channel_ids_out)
         except Exception as exc:
             print(f"Warning: could not overwrite channel_ids.npy: {exc}")
+        if simple_export:
+            params_path.write_text(text)
+            return folder, group_unique
         pattern_map = re.compile(r"channel_map\s*=.*")
         replacement_map = f"channel_map = np.array({channel_map.tolist()}, dtype=np.int32)"
         text, count_map = pattern_map.subn(replacement_map, text, count=1)
@@ -467,6 +645,23 @@ def export_for_phy(analyzer, base_folder: Path, label: str, groups, original_ind
     return folder, group_unique
 
 
+def warn_unknown_sc2_overrides(defaults: dict, overrides: dict, prefix: str = "") -> None:
+    """Warn when SC2 overrides include keys not present in default params."""
+    if not isinstance(overrides, dict):
+        return
+    for key, value in overrides.items():
+        path = f"{prefix}{key}"
+        if key not in defaults:
+            print(f"Warning: SC2 override '{path}' not in default params; it may be ignored.")
+            continue
+        default_val = defaults.get(key)
+        if isinstance(value, dict):
+            if isinstance(default_val, dict):
+                warn_unknown_sc2_overrides(default_val, value, prefix=f"{path}.")
+            else:
+                print(f"Warning: SC2 override '{path}' is a dict but default is not; it may be ignored.")
+
+
 def export_for_si_gui(analyzer, base_folder: Path, label: str):
     """Save a Zarr copy that SpikeInterface GUI can open directly."""
     folder = base_folder / f"si_gui_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -512,6 +707,7 @@ def main():
     if DEBUG_WARN_TRACE:
         enable_warning_trace()
 
+
     root_dir = args.root_dir
     base_out = args.base_out
 
@@ -549,6 +745,8 @@ def main():
         AUTO_BAD_CHANNELS,
         "STRICT_GROUPS=",
         STRICT_GROUPS,
+        "SORT_BY_GROUP=",
+        SORT_BY_GROUP,
         "TEST_SECONDS=",
         TEST_SECONDS,
         "STREAM_NAME=",
@@ -641,7 +839,12 @@ def main():
     print(f"Bad channels source: {bad_source}")
 
     manual_bad = resolve_bad_channel_ids(recording, bad_channels)
-    auto_bad = detect_bad_channel_ids(recording, AUTO_BAD_CHANNELS)
+    auto_bad = detect_bad_channel_ids(
+        recording,
+        AUTO_BAD_CHANNELS,
+        method=AUTO_BAD_CHANNELS_METHOD,
+        **AUTO_BAD_CHANNELS_KWARGS,
+    )
     # Sort for readability
     auto_bad_sorted = np.sort(auto_bad)
     if AUTO_BAD_CHANNELS:
@@ -677,6 +880,21 @@ def main():
     groups = filtered_groups
     # Preserve original tetrode indices for group labels after bad-channel removal (non-contiguous IDs are expected).
     group_ids = filtered_indices.copy() if filtered_indices else list(range(len(groups)))
+    grouped_ids = {ch for grp in groups for ch in grp}
+    if grouped_ids:
+        # Enforce that only grouped channels remain (avoids ungrouped channels sitting at [0, 0]).
+        keep_ids = [ch for ch in channel_order if ch in grouped_ids]
+        if len(keep_ids) != len(channel_order):
+            missing = [ch for ch in channel_order if ch not in grouped_ids]
+            print(
+                f"Warning: {len(missing)} channels not present in groups; removing from recording "
+                f"(first: {missing[:5]})"
+            )
+            recording = safe_channel_slice(recording, keep_ids)
+            channel_order = keep_ids
+    small_groups = [gid for gid, grp in zip(group_ids, groups) if len(grp) < 3]
+    if small_groups:
+        print(f"Warning: tetrodes with <3 channels: {small_groups}")
     if manual_groups:
         print(f"Tetrodes kept: {len(groups)} (source: {groups_source}); first group: {groups[0] if groups else 'n/a'}")
     else:
@@ -713,6 +931,7 @@ def main():
             operator = (CAR_OPERATOR or "median").lower()
             if mode == "tetrode" and groups:
                 # SpikeInterface uses reference="global" with groups to mean per-group CAR.
+                print("WARNING: per-tetrode CAR can attenuate spikes; use only if verified on your data.")
                 recording = spre.common_reference(
                     recording, reference="global", operator=operator, groups=groups
                 )
@@ -739,6 +958,39 @@ def main():
             rec_sc2 = ensure_probe_attached(rec_sc2)
         except Exception as exc:
             print(f"Warning: failed to attach probe to rec_sc2: {exc}")
+    if MATERIALIZE_SI_PREPROCESS:
+        try:
+            preproc_folder = SC2_OUT / "rec_sc2_preprocessed"
+            rec_sc2 = rec_sc2.save(folder=preproc_folder, format="binary_folder", overwrite=True)
+            print(f"Materialized rec_sc2 at {preproc_folder}")
+            if ATTACH_GEOMETRY and groups:
+                rec_sc2 = ensure_geom_and_units(
+                    rec_sc2,
+                    groups,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                )
+        except Exception as exc:
+            print(f"Warning: failed to materialize rec_sc2: {exc}")
+
+    def _force_dummy_probe(rec, label):
+        try:
+            if rec.get_probe() is None:
+                rec = rec.set_dummy_probe_from_locations()
+                print(f"Attached dummy probe to {label} (sorter input).")
+        except Exception:
+            try:
+                rec = rec.set_dummy_probe_from_locations()
+                print(f"Attached dummy probe to {label} (sorter input).")
+            except Exception as exc:
+                print(f"Warning: failed to attach dummy probe to {label}: {exc}")
+        return rec
+
+    if ATTACH_GEOMETRY:
+        # Note: SC2 can still warn about missing probes in internal snippet wrappers; this
+        # re-attaches a dummy probe so geometry is visible to those internal steps.
+        rec_sc2 = _force_dummy_probe(rec_sc2, "rec_sc2")
 
     # Optionally use a scaled, bandpassed (non-whitened) copy for Phy/export so snippets are not raw.
     rec_export = recording
@@ -789,14 +1041,84 @@ def main():
             margin_ms=EXPORT_BP_MARGIN_MS,
         )
         print(f"Export path: bandpass {EXPORT_BP_MIN_HZ}-{EXPORT_BP_MAX_HZ} Hz for Phy/GUI export.")
+    if ATTACH_GEOMETRY and groups:
+        # Re-attach geometry in case scaling/bandpass dropped probe metadata.
+        rec_export = ensure_geom_and_units(
+            rec_export,
+            groups,
+            tetrodes_per_row=tetrodes_per_row,
+            tetrode_offsets=tetrode_offsets,
+            scale_to_uv=False,
+        )
+    if MATERIALIZE_EXPORT:
+        try:
+            export_folder = SC2_OUT / "rec_export_prepared"
+            rec_export = rec_export.save(folder=export_folder, format="binary_folder", overwrite=True)
+            print(f"Materialized rec_export at {export_folder}")
+            if ATTACH_GEOMETRY and groups:
+                rec_export = ensure_geom_and_units(
+                    rec_export,
+                    groups,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                )
+        except Exception as exc:
+            print(f"Warning: failed to materialize rec_export: {exc}")
     # Ensure group labels are on the export recording for downstream tools
     set_group_property(rec_export, groups, group_ids)
+    if ANALYZER_FROM_SORTER:
+        rec_analyzer = rec_sc2
+        # Optionally scale to uV for QC interpretability (does not affect sorter output)
+        if EXPORT_SCALE_TO_UV:
+            try:
+                gains = rec_analyzer.get_channel_gains()
+            except Exception:
+                gains = None
+            try:
+                offsets = rec_analyzer.get_channel_offsets()
+            except Exception:
+                offsets = None
+            if gains is not None:
+                gains_arr = np.asarray(gains)
+                n_ch = rec_analyzer.get_num_channels()
+                if gains_arr.ndim == 0 or gains_arr.size == n_ch:
+                    offsets_arr = np.zeros_like(gains_arr, dtype="float32")
+                    if offsets is not None:
+                        off_arr = np.asarray(offsets)
+                        if off_arr.ndim == 0 or off_arr.size == n_ch:
+                            offsets_arr = off_arr
+                    rec_analyzer = spre.scale(rec_analyzer, gain=gains_arr, offset=offsets_arr, dtype="float32")
+                    print("Analyzer path: scaled rec_sc2 to microvolts for QC.")
+        if ATTACH_GEOMETRY and groups:
+            rec_analyzer = ensure_geom_and_units(
+                rec_analyzer,
+                groups,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+            )
+        if MATERIALIZE_EXPORT:
+            try:
+                analyzer_folder = SC2_OUT / "rec_analyzer_prepared"
+                rec_analyzer = rec_analyzer.save(
+                    folder=analyzer_folder,
+                    format="binary_folder",
+                    overwrite=True,
+                )
+                print(f"Materialized rec_analyzer at {analyzer_folder}")
+            except Exception as exc:
+                print(f"Warning: failed to materialize rec_analyzer: {exc}")
+    else:
+        rec_analyzer = rec_export
 
     sc2_run = SC2_OUT / f"sc2_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     safe_rmtree(sc2_run)
 
     set_group_property(rec_sc2, groups, group_ids)  # stores tetrode index as 'group' property for downstream tools
-    sc2_params = merge_params(ss.Spykingcircus2Sorter.default_params(), SC2_PARAM_OVERRIDES)
+    sc2_defaults = ss.Spykingcircus2Sorter.default_params()
+    warn_unknown_sc2_overrides(sc2_defaults, SC2_PARAM_OVERRIDES)
+    sc2_params = merge_params(sc2_defaults, SC2_PARAM_OVERRIDES)
     if USE_SI_PREPROCESS:
         sc2_params["apply_preprocessing"] = False
         if "preprocessing" in sc2_params:
@@ -819,16 +1141,94 @@ def main():
     )
     if isinstance(sc2_params.get("whitening"), dict):
         print("SC2 params -> whitening:", sc2_params.get("whitening"))
+    analyzer_ms_before = None
+    analyzer_ms_after = None
     try:
-        sorting_sc2 = ss.run_sorter(
-            "spykingcircus2",
-            rec_sc2,
-            folder=sc2_run,
-            remove_existing_folder=True,
-            verbose=True,
-            **sc2_params,
+        general = sc2_params.get("general", {}) if isinstance(sc2_params, dict) else {}
+        analyzer_ms_before = general.get("ms_before")
+        analyzer_ms_after = general.get("ms_after")
+    except Exception:
+        pass
+    if analyzer_ms_before is not None or analyzer_ms_after is not None:
+        print(
+            "Analyzer waveform window:",
+            f"{analyzer_ms_before} ms before / {analyzer_ms_after} ms after",
         )
-        print(f"SC2 units: {sorting_sc2.get_num_units()} | output: {sc2_run}")
+    phy_folders = []
+    try:
+        if SORT_BY_GROUP:
+            print("Sorting per tetrode group (split_by='group').")
+            rec_sc2_dict = {gid: _force_dummy_probe(rec, f"rec_sc2[{gid}]") for gid, rec in rec_sc2.split_by("group").items()}
+            rec_export_dict = rec_export.split_by("group")
+
+            def _gid_key(value):
+                try:
+                    return int(value)
+                except Exception:
+                    return value
+
+            def _get_group_rec(rec_dict, key, fallback):
+                if rec_dict is None:
+                    return fallback
+                if key in rec_dict:
+                    return rec_dict[key]
+                key_int = _gid_key(key)
+                if key_int in rec_dict:
+                    return rec_dict[key_int]
+                key_str = str(key)
+                if key_str in rec_dict:
+                    return rec_dict[key_str]
+                return fallback
+
+            if group_ids is not None:
+                group_map = {_gid_key(gid): grp for gid, grp in zip(group_ids, groups)}
+            else:
+                group_map = {_gid_key(idx): grp for idx, grp in enumerate(groups)}
+            sortings_sc2 = ss.run_sorter(
+                "spykingcircus2",
+                rec_sc2_dict,
+                folder=sc2_run,
+                remove_existing_folder=True,
+                verbose=True,
+                **sc2_params,
+            )
+            for gid, sorting_sc2 in sortings_sc2.items():
+                gid_key = _gid_key(gid)
+                rec_exp = _get_group_rec(rec_export_dict, gid_key, rec_export)
+                rec_an = rec_exp if not ANALYZER_FROM_SORTER else _get_group_rec(rec_sc2_dict, gid_key, rec_exp)
+                analyzer_sc2 = build_analyzer(
+                    sorting_sc2,
+                    rec_an,
+                    SC2_OUT,
+                    f"sc2_g{gid}",
+                    wf_ms_before=analyzer_ms_before,
+                    wf_ms_after=analyzer_ms_after,
+                )
+                analyzer_sc2 = maybe_remove_redundant_units(analyzer_sc2, f"sc2_g{gid}")
+                if EXPORT_TO_PHY:
+                    grp_channels = group_map.get(gid_key, list(rec_exp.channel_ids))
+                    phy_folder, _ = export_for_phy(
+                        analyzer_sc2,
+                        SC2_OUT,
+                        f"sc2_g{gid}",
+                        [grp_channels],
+                        original_index_map,
+                        [gid],
+                    )
+                    phy_folders.append(phy_folder)
+                if EXPORT_TO_SI_GUI:
+                    export_for_si_gui(analyzer_sc2, SI_GUI_OUT, f"sc2_g{gid}")
+            print(f"SC2 per-group runs complete | output: {sc2_run}")
+        else:
+            sorting_sc2 = ss.run_sorter(
+                "spykingcircus2",
+                rec_sc2,
+                folder=sc2_run,
+                remove_existing_folder=True,
+                verbose=True,
+                **sc2_params,
+            )
+            print(f"SC2 units: {sorting_sc2.get_num_units()} | output: {sc2_run}")
     except Exception as exc:
         print(f"Error: SpykingCircus2 sorter failed: {exc}")
         print(f"Attempting to remove partial SC2 output folder: {sc2_run}")
@@ -838,27 +1238,51 @@ def main():
             print(f"Warning: failed to remove partial output folder: {exc2}")
         raise
 
-    analyzer_sc2 = build_analyzer(sorting_sc2, rec_export, SC2_OUT, "sc2")
+    if not SORT_BY_GROUP:
+        analyzer_sc2 = build_analyzer(
+            sorting_sc2,
+            rec_analyzer,
+            SC2_OUT,
+            "sc2",
+            wf_ms_before=analyzer_ms_before,
+            wf_ms_after=analyzer_ms_after,
+        )
+        analyzer_sc2 = maybe_remove_redundant_units(analyzer_sc2, "sc2")
 
-    phy_folder = None
-    group_vals = None
-    if EXPORT_TO_PHY:
-        phy_folder, group_vals = export_for_phy(analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map, group_ids)
-    if EXPORT_TO_SI_GUI:
-        export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
+        if EXPORT_TO_PHY:
+            phy_folder, _ = export_for_phy(analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map, group_ids)
+            phy_folders.append(phy_folder)
+        if EXPORT_TO_SI_GUI:
+            export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
 
     print("SC2 pipeline complete.")
-    if phy_folder:
-        params_py = phy_folder / "params.py"
-        if EXPORT_PHY_EXTRACT_WAVEFORMS:
-            try:
-                subprocess.run(["phy", "extract-waveforms", str(params_py)], check=True)
-                print("Phy: extracted waveforms for export.")
-            except FileNotFoundError:
-                print("Warning: 'phy' command not found; skipping extract-waveforms.")
-            except subprocess.CalledProcessError as exc:
-                print(f"Warning: phy extract-waveforms failed: {exc}")
-        print(f"Run: phy template-gui \"{params_py}\"")
+    if phy_folders:
+        if SORT_BY_GROUP:
+            print("Summary: per-group exports written (see each group's QC/units within its folder).")
+        for folder in phy_folders:
+            params_py = folder / "params.py"
+            if EXPORT_PHY_EXTRACT_WAVEFORMS:
+                try:
+                    subprocess.run(["phy", "extract-waveforms", str(params_py)], check=True)
+                    print(f"Phy: extracted waveforms for export ({folder.name}).")
+                except FileNotFoundError:
+                    print("Warning: 'phy' command not found; skipping extract-waveforms.")
+                except subprocess.CalledProcessError as exc:
+                    print(f"Warning: phy extract-waveforms failed: {exc}")
+            print(f"Run: phy template-gui \"{params_py}\"")
+            if not SORT_BY_GROUP:
+                try:
+                    n_units = len(sorting_sc2.get_unit_ids())
+                except Exception:
+                    n_units = "unknown"
+                print(
+                    "Summary:",
+                    f"units={n_units},",
+                    f"qc_metrics={Path(analyzer_sc2.folder) / 'qc_metrics.csv' if getattr(analyzer_sc2, 'folder', None) else 'n/a'},",
+                    f"phy={folder}",
+                )
+            else:
+                print(f"Summary: phy={folder}")
 
 if __name__ == "__main__":
     main()
