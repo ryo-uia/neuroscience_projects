@@ -105,9 +105,15 @@ def ensure_probe_attached(recording, radius=5):
     return recording.set_probe(probe, in_place=False)
 
 
-def ensure_geom_and_units(recording, groups, tetrodes_per_row=None, scale_to_uv=True, tetrode_offsets=None):
+def ensure_geom_and_units(recording, groups, tetrodes_per_row=None, scale_to_uv=True, tetrode_offsets=None, pitch=20.0):
     """Attach geometry and check for gain_to_uV metadata; does not rescale traces."""
-    rec = attach_geom(recording, groups, tetrodes_per_row, tetrode_offsets=tetrode_offsets)
+    rec = attach_geom(
+        recording,
+        groups,
+        tetrodes_per_row,
+        pitch=pitch,
+        tetrode_offsets=tetrode_offsets,
+    )
     if scale_to_uv:
         gain = None
         try:

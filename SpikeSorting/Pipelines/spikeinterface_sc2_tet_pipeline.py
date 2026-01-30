@@ -21,6 +21,8 @@ import spikeinterface.preprocessing as spre
 import spikeinterface.sorters as ss
 from spikeinterface.core import create_sorting_analyzer
 from spikeinterface.exporters import export_to_phy
+from probeinterface import Probe
+
 try:
     import spikeinterface.curation as sc
 except Exception:
@@ -50,11 +52,40 @@ from Functions.pipeline_utils import (
 )
 
 # ---------------------------------------------------------------------
+# Config selection helpers (optional prompts)
+# ---------------------------------------------------------------------
+
+def _choose_config_json(label: str, candidates: list[Path], default_path: Path | None) -> Path | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    default_idx = 0
+    if default_path in candidates:
+        default_idx = candidates.index(default_path)
+    print(f"Available {label} JSON files:")
+    for idx, path in enumerate(candidates):
+        print(f"  [{idx}] {path}")
+    try:
+        resp = input(f"Select {label} JSON index [default {default_idx}]: ").strip()
+    except EOFError:
+        return candidates[default_idx]
+    if resp == "":
+        return candidates[default_idx]
+    try:
+        idx = int(resp)
+    except ValueError:
+        return candidates[default_idx]
+    if 0 <= idx < len(candidates):
+        return candidates[idx]
+    return candidates[default_idx]
+
+# ---------------------------------------------------------------------
 # User configuration
 # ---------------------------------------------------------------------
 
 # Session/data selection
-TEST_SECONDS = 300  # set to None for full recording
+TEST_SECONDS = 600  # set to None for full recording
 DEFAULT_ROOT_DIR = PROJECT_ROOT / "recordings"
 SESSION_SUBPATH = None  # provide relative Open Ephys path to skip auto-discovery
 SESSION_SELECTION = "prompt"  # always prompt for session selection
@@ -71,7 +102,7 @@ EXPORT_TO_PHY = True
 EXPORT_TO_SI_GUI = False
 EXPORT_PHY_EXTRACT_WAVEFORMS = False  # run `phy extract-waveforms` to precompute Phy waveforms (UI speed only; requires Phy CLI)
 SIMPLE_PHY_EXPORT = None  # auto: follows SORT_BY_GROUP; set True/False to override
-EXPORT_PHY_CHANNEL_IDS_MODE = "oe_label"  # "oe_index"=OE numeric IDs (0-based, gaps after removals), "oe_label"=CH## labels, "as_exported"=compact 0..N-1
+EXPORT_PHY_CHANNEL_IDS_MODE = "oe_index"  # "oe_index"=OE numeric IDs (0-based, gaps after removals), "oe_label"=CH## labels, "as_exported"=compact 0..N-1
 MATERIALIZE_EXPORT = False  # save rec_export to disk before analyzer/export (faster reuse; uses extra space)
 
 # Analyzer/QC
@@ -118,10 +149,16 @@ CHANNEL_GROUPS: list[list[int | str]] = [
 CHANNEL_GROUPS_PATH = None  # optional JSON file path or env SPIKESORT_CHANNEL_GROUPS
 STRICT_GROUPS = True  # error out if no valid groups can be resolved (recommended for tetrodes)
 SORT_BY_GROUP = False  # when True, run SC2 separately per tetrode group (one sorter/export per group)
+# Bundle sorting option: keep one group with grid geometry (similar to .prb layout).
+BUNDLE_GROUPING_MODE = "tetrode"  # "tetrode" (default) or "single_grid"
+# When "tetrode", the bundle grid settings below are ignored.
+BUNDLE_GRID_COLS = 4
+BUNDLE_GRID_DX_UM = 10.0  # bundle grid x-spacing (synthetic; mirrors .prb layout when single_grid)
+BUNDLE_GRID_DY_UM = 200.0  # bundle grid y-spacing (synthetic; mirrors .prb layout when single_grid)
 
 # Bad channels (use IDs to avoid positional mismatch across sessions or after slicing)
-BAD_CHANNELS = ["CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"] #Tatsu
-#BAD_CHANNELS = ["CH58", "CH64", "CH62", "CH60", "CH63", "CH61", "CH59", "CH57", "CH47", "CH45", "CH43", "CH41"] #Fuyu
+#BAD_CHANNELS = ["CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"] #Tatsu
+BAD_CHANNELS = ["CH58", "CH64", "CH62", "CH60", "CH63", "CH61", "CH59", "CH57", "CH47", "CH45", "CH43", "CH41"] #Fuyu
 BAD_CHANNELS_PATH = None  # optional JSON file path or env SPIKESORT_BAD_CHANNELS
 AUTO_BAD_CHANNELS = False  # auto-detect bad channels (merged with manual list; can be aggressive)
 AUTO_BAD_CHANNELS_METHOD = "std"  # "std" or "mad" are typical for tetrodes
@@ -132,6 +169,11 @@ ATTACH_GEOMETRY = True
 LINEARIZE_TRACEVIEW = True
 TRACEVIEW_CONTACT_SPACING_UM = 20.0
 TRACEVIEW_GROUP_SPACING_UM = 200.0
+# Synthetic within‑tetrode pitch for the 2x2 layout (geometry only).
+TETRODE_PITCH_UM = 20.0
+# Synthetic spacing between tetrodes in the bundle layout (only affects geometry/whitening/visualization).
+TETRODE_SPACING_DX_UM = 300.0
+TETRODE_SPACING_DY_UM = 300.0
 
 # Optional SI preprocessing: bandpass (+ optional notch/CAR/whitening).
 # When enabled, SC2 filtering/CMR are disabled, but SC2 still whitens internally.
@@ -226,7 +268,18 @@ def enable_warning_trace(limit: int = 12) -> None:
 # Pipeline helpers from Functions.pipeline_utils and Functions.si_utils
 # ---------------------------------------------------------------------
 
-
+def attach_bundle_grid_geom(recording, ncols: int, dx_um: float, dy_um: float):
+    """Attach a simple grid geometry for bundle sorting (one group, N channels)."""
+    n_ch = recording.get_num_channels()
+    positions = np.zeros((n_ch, 2), dtype=float)
+    for idx in range(n_ch):
+        row = idx // ncols
+        col = idx % ncols
+        positions[idx] = (col * dx_um, row * dy_um)
+    probe = Probe(ndim=2)
+    probe.set_contacts(positions=positions, shapes="circle", shape_params={"radius": 7})
+    probe.set_device_channel_indices(np.arange(n_ch))
+    return recording.set_probe(probe, in_place=False)
 
 
 def preprocess_for_sc2(recording, groups=None):
@@ -707,6 +760,25 @@ def main():
     if DEBUG_WARN_TRACE:
         enable_warning_trace()
 
+    env_groups_path = os.environ.get("SPIKESORT_CHANNEL_GROUPS", None)
+    env_bad_path = os.environ.get("SPIKESORT_BAD_CHANNELS", None)
+    config_dir = PROJECT_ROOT / "config"
+    if not args.channel_groups and not env_groups_path:
+        group_candidates = sorted(config_dir.glob("channel_groups_*.json"))
+        if group_candidates:
+            CHANNEL_GROUPS_PATH = _choose_config_json(
+                "channel groups",
+                group_candidates,
+                group_candidates[0] if len(group_candidates) == 1 else None,
+            )
+    if not args.bad_channels and not env_bad_path:
+        bad_candidates = sorted(config_dir.glob("bad_channels_*.json"))
+        if bad_candidates:
+            BAD_CHANNELS_PATH = _choose_config_json(
+                "bad channels",
+                bad_candidates,
+                bad_candidates[0] if len(bad_candidates) == 1 else None,
+            )
 
     root_dir = args.root_dir
     base_out = args.base_out
@@ -782,7 +854,6 @@ def main():
     channel_order = original_channel_order.copy()
 
     # Resolve manual group configuration (inline, env, or CLI file).
-    env_groups_path = os.environ.get("SPIKESORT_CHANNEL_GROUPS", None)
     manual_groups = CHANNEL_GROUPS
     groups_source = "inline CHANNEL_GROUPS"
 
@@ -823,7 +894,6 @@ def main():
     # Resolve bad channels (inline, env, or CLI file).
     bad_channels = BAD_CHANNELS
     bad_source = "inline BAD_CHANNELS"
-    env_bad_path = os.environ.get("SPIKESORT_BAD_CHANNELS", None)
     env_bad_loaded = load_bad_channels_from_path(env_bad_path) if env_bad_path else None
     if env_bad_loaded is not None:
         bad_channels = env_bad_loaded
@@ -900,11 +970,18 @@ def main():
     else:
         print(f"Tetrodes kept: {len(groups)} (fallback chunking); first group: {groups[0] if groups else 'n/a'}")
 
+    bundle_grid = False
+    if not SORT_BY_GROUP and (BUNDLE_GROUPING_MODE or "").lower() in ("single_grid", "grid", "single"):
+        bundle_grid = True
+        groups = [channel_order.copy()]
+        group_ids = [0]
+        print(f"Bundle grouping mode: single grid ({len(groups[0])} channels).")
+
     tetrode_offsets = None
     tetrodes_per_row = max(1, int(np.ceil(np.sqrt(base_tetrode_count)))) if base_tetrode_count else 1
-    if groups:
-        dx = 150.0
-        dy = 150.0
+    if groups and not bundle_grid:
+        dx = TETRODE_SPACING_DX_UM
+        dy = TETRODE_SPACING_DY_UM
         num_rows = int(np.ceil(base_tetrode_count / tetrodes_per_row))
         tetrode_offsets = []
         for orig_idx in filtered_indices:
@@ -915,14 +992,19 @@ def main():
             tetrode_offsets.append((x, y))
 
     if ATTACH_GEOMETRY and groups:
-        recording = ensure_geom_and_units(
-            recording,
-            groups,
-            tetrodes_per_row=tetrodes_per_row,
-            tetrode_offsets=tetrode_offsets,
-            scale_to_uv=False,
-        )
-        print(f"Geometry attached to recording (tetrodes_per_row={tetrodes_per_row}).")
+        if bundle_grid:
+            recording = attach_bundle_grid_geom(recording, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+            print(f"Geometry attached to recording (bundle grid {BUNDLE_GRID_COLS} cols).")
+        else:
+            recording = ensure_geom_and_units(
+                recording,
+                groups,
+                pitch=TETRODE_PITCH_UM,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+            )
+            print(f"Geometry attached to recording (tetrodes_per_row={tetrodes_per_row}).")
 
     # Optional SI common median reference before SC2 (per tetrode or global) when not using SI preprocessing
     if not USE_SI_PREPROCESS and SI_APPLY_CAR:
@@ -946,13 +1028,17 @@ def main():
 
     if ATTACH_GEOMETRY and groups:
         # Re-attach geometry after preprocessing in case properties/probe were dropped.
-        rec_sc2 = ensure_geom_and_units(
-            rec_sc2,
-            groups,
-            tetrodes_per_row=tetrodes_per_row,
-            tetrode_offsets=tetrode_offsets,
-            scale_to_uv=False,
-        )
+        if bundle_grid:
+            rec_sc2 = attach_bundle_grid_geom(rec_sc2, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+        else:
+            rec_sc2 = ensure_geom_and_units(
+                rec_sc2,
+                groups,
+                pitch=TETRODE_PITCH_UM,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+            )
     if ATTACH_GEOMETRY and groups:
         try:
             rec_sc2 = ensure_probe_attached(rec_sc2)
@@ -967,6 +1053,7 @@ def main():
                 rec_sc2 = ensure_geom_and_units(
                     rec_sc2,
                     groups,
+                    pitch=TETRODE_PITCH_UM,
                     tetrodes_per_row=tetrodes_per_row,
                     tetrode_offsets=tetrode_offsets,
                     scale_to_uv=False,
@@ -1043,26 +1130,34 @@ def main():
         print(f"Export path: bandpass {EXPORT_BP_MIN_HZ}-{EXPORT_BP_MAX_HZ} Hz for Phy/GUI export.")
     if ATTACH_GEOMETRY and groups:
         # Re-attach geometry in case scaling/bandpass dropped probe metadata.
-        rec_export = ensure_geom_and_units(
-            rec_export,
-            groups,
-            tetrodes_per_row=tetrodes_per_row,
-            tetrode_offsets=tetrode_offsets,
-            scale_to_uv=False,
-        )
+        if bundle_grid:
+            rec_export = attach_bundle_grid_geom(rec_export, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+        else:
+            rec_export = ensure_geom_and_units(
+                rec_export,
+                groups,
+                pitch=TETRODE_PITCH_UM,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+            )
     if MATERIALIZE_EXPORT:
         try:
             export_folder = SC2_OUT / "rec_export_prepared"
             rec_export = rec_export.save(folder=export_folder, format="binary_folder", overwrite=True)
             print(f"Materialized rec_export at {export_folder}")
             if ATTACH_GEOMETRY and groups:
-                rec_export = ensure_geom_and_units(
-                    rec_export,
-                    groups,
-                    tetrodes_per_row=tetrodes_per_row,
-                    tetrode_offsets=tetrode_offsets,
-                    scale_to_uv=False,
-                )
+                if bundle_grid:
+                    rec_export = attach_bundle_grid_geom(rec_export, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+                else:
+                    rec_export = ensure_geom_and_units(
+                        rec_export,
+                        groups,
+                        pitch=TETRODE_PITCH_UM,
+                        tetrodes_per_row=tetrodes_per_row,
+                        tetrode_offsets=tetrode_offsets,
+                        scale_to_uv=False,
+                    )
         except Exception as exc:
             print(f"Warning: failed to materialize rec_export: {exc}")
     # Ensure group labels are on the export recording for downstream tools
@@ -1091,13 +1186,17 @@ def main():
                     rec_analyzer = spre.scale(rec_analyzer, gain=gains_arr, offset=offsets_arr, dtype="float32")
                     print("Analyzer path: scaled rec_sc2 to microvolts for QC.")
         if ATTACH_GEOMETRY and groups:
-            rec_analyzer = ensure_geom_and_units(
-                rec_analyzer,
-                groups,
-                tetrodes_per_row=tetrodes_per_row,
-                tetrode_offsets=tetrode_offsets,
-                scale_to_uv=False,
-            )
+            if bundle_grid:
+                rec_analyzer = attach_bundle_grid_geom(rec_analyzer, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+            else:
+                rec_analyzer = ensure_geom_and_units(
+                    rec_analyzer,
+                    groups,
+                    pitch=TETRODE_PITCH_UM,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                )
         if MATERIALIZE_EXPORT:
             try:
                 analyzer_folder = SC2_OUT / "rec_analyzer_prepared"
@@ -1155,6 +1254,7 @@ def main():
             f"{analyzer_ms_before} ms before / {analyzer_ms_after} ms after",
         )
     phy_folders = []
+    si_gui_folders = []
     try:
         if SORT_BY_GROUP:
             print("Sorting per tetrode group (split_by='group').")
@@ -1217,7 +1317,7 @@ def main():
                     )
                     phy_folders.append(phy_folder)
                 if EXPORT_TO_SI_GUI:
-                    export_for_si_gui(analyzer_sc2, SI_GUI_OUT, f"sc2_g{gid}")
+                    si_gui_folders.append(export_for_si_gui(analyzer_sc2, SI_GUI_OUT, f"sc2_g{gid}"))
             print(f"SC2 per-group runs complete | output: {sc2_run}")
         else:
             sorting_sc2 = ss.run_sorter(
@@ -1253,7 +1353,7 @@ def main():
             phy_folder, _ = export_for_phy(analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map, group_ids)
             phy_folders.append(phy_folder)
         if EXPORT_TO_SI_GUI:
-            export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
+            si_gui_folders.append(export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2"))
 
     print("SC2 pipeline complete.")
     if phy_folders:
@@ -1269,7 +1369,6 @@ def main():
                     print("Warning: 'phy' command not found; skipping extract-waveforms.")
                 except subprocess.CalledProcessError as exc:
                     print(f"Warning: phy extract-waveforms failed: {exc}")
-            print(f"Run: phy template-gui \"{params_py}\"")
             if not SORT_BY_GROUP:
                 try:
                     n_units = len(sorting_sc2.get_unit_ids())
@@ -1278,11 +1377,13 @@ def main():
                 print(
                     "Summary:",
                     f"units={n_units},",
-                    f"qc_metrics={Path(analyzer_sc2.folder) / 'qc_metrics.csv' if getattr(analyzer_sc2, 'folder', None) else 'n/a'},",
-                    f"phy={folder}",
+                    f"qc_metrics={Path(analyzer_sc2.folder) / 'qc_metrics.csv' if getattr(analyzer_sc2, 'folder', None) else 'n/a'}",
                 )
             else:
-                print(f"Summary: phy={folder}")
+                print("Summary: per-group Phy exports written.")
+    if si_gui_folders:
+        for folder in si_gui_folders:
+            print(f"Run: python -m spikeinterface_gui \"{folder}\"")
 
 if __name__ == "__main__":
     main()

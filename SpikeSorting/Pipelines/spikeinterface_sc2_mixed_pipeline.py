@@ -22,6 +22,7 @@ import spikeinterface.preprocessing as spre
 import spikeinterface.sorters as ss
 from spikeinterface.core import create_sorting_analyzer
 from spikeinterface.exporters import export_to_phy
+from probeinterface import Probe
 
 try:
     import spikeinterface.curation as sc
@@ -52,11 +53,40 @@ from Functions.pipeline_utils import (
 )
 
 # ---------------------------------------------------------------------
-# Configuration
+# Config selection helpers (optional prompts)
+# ---------------------------------------------------------------------
+
+def _choose_config_json(label: str, candidates: list[Path], default_path: Path | None) -> Path | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    default_idx = 0
+    if default_path in candidates:
+        default_idx = candidates.index(default_path)
+    print(f"Available {label} JSON files:")
+    for idx, path in enumerate(candidates):
+        print(f"  [{idx}] {path}")
+    try:
+        resp = input(f"Select {label} JSON index [default {default_idx}]: ").strip()
+    except EOFError:
+        return candidates[default_idx]
+    if resp == "":
+        return candidates[default_idx]
+    try:
+        idx = int(resp)
+    except ValueError:
+        return candidates[default_idx]
+    if 0 <= idx < len(candidates):
+        return candidates[idx]
+    return candidates[default_idx]
+
+# ---------------------------------------------------------------------
+# User configuration
 # ---------------------------------------------------------------------
 
 # Session/data selection
-TEST_SECONDS = 300  # set to None for full recording
+TEST_SECONDS = 600  # set to None for full recording
 DEFAULT_ROOT_DIR = PROJECT_ROOT / "recordings"
 SESSION_SUBPATH = None  # provide relative Open Ephys path to skip auto-discovery
 SESSION_SELECTION = "prompt"  # always prompt for session selection
@@ -72,12 +102,34 @@ SI_GUI_OUT = None
 EXPORT_TO_PHY = True
 EXPORT_TO_SI_GUI = False
 EXPORT_PHY_EXTRACT_WAVEFORMS = False  # run `phy extract-waveforms` to precompute Phy waveforms (UI speed only; requires Phy CLI)
-SIMPLE_PHY_EXPORT = None  # auto: follows SORT_BY_GROUP (not used here); set True/False to override
-EXPORT_PHY_CHANNEL_IDS_MODE = "oe_index"  # "oe_index", "oe_label", or "as_exported"
+SIMPLE_PHY_EXPORT = None  # auto: follows SORT_BY_GROUP; set True/False to override
+EXPORT_PHY_CHANNEL_IDS_MODE = "oe_index"  # "oe_index"=OE numeric IDs (0-based, gaps after removals), "oe_label"=CH## labels, "as_exported"=compact 0..N-1
+MATERIALIZE_EXPORT = False  # save rec_export to disk before analyzer/export (faster reuse; uses extra space)
+
+# Analyzer/QC
+COMPUTE_QC_METRICS = True  # compute QC metrics on analyzer output
+QC_METRIC_NAMES = [
+    "firing_rate",
+    "presence_ratio",
+    "isi_violation",
+    "snr",
+    "amplitude_cutoff",
+]
+QC_PC_METRICS = {
+    "isolation_distance",
+    "l_ratio",
+    "d_prime",
+    "nearest_neighbor",
+    "nn_isolation",
+    "nn_noise_overlap",
+    "silhouette",
+}
 
 # Channel grouping (tetrodes/stereotrodes)
-# Optional explicit grouping: each inner list is a tetrode or stereotrode.
-# You can mix sizes, e.g., [[0, 1, 2, 3], [4, 5], [6, 7, 8, 9]].
+CHANNELS_PER_TETRODE = 4
+# Optional explicit channel grouping. If set, this fixed map is used instead of chunking by order
+# (prevents shifts after bad-channel removal).
+# Mixed recordings can include stereotrode groups (2 channels).
 CHANNEL_GROUPS: list[list[int | str]] = [
     ["CH40", "CH38", "CH36", "CH34"],  # TT1A-D
     ["CH48", "CH46", "CH44", "CH42"],  # TT2A-D
@@ -97,14 +149,19 @@ CHANNEL_GROUPS: list[list[int | str]] = [
     ["CH26", "CH28", "CH30", "CH32"],  # TT16A-D
 ]
 CHANNEL_GROUPS_PATH = None  # optional JSON file path or env SPIKESORT_CHANNEL_GROUPS
-CHANNELS_PER_TETRODE = 4  # fallback chunk size when CHANNEL_GROUPS is empty
 STRICT_GROUPS = True  # error out if no valid groups can be resolved (recommended)
+# Bundle sorting option: keep one group with grid geometry (similar to .prb layout).
+BUNDLE_GROUPING_MODE = "tetrode"  # "tetrode" (default) or "single_grid"
+# When "tetrode", the bundle grid settings below are ignored.
+BUNDLE_GRID_COLS = 4
+BUNDLE_GRID_DX_UM = 10.0  # bundle grid x-spacing (synthetic; mirrors .prb layout when single_grid)
+BUNDLE_GRID_DY_UM = 200.0  # bundle grid y-spacing (synthetic; mirrors .prb layout when single_grid)
 
-# Bad channels (use IDs to avoid positional mismatch across sessions)
-BAD_CHANNELS = ["CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"]
+# Bad channels (use IDs to avoid positional mismatch across sessions or after slicing)
+BAD_CHANNELS = []
 BAD_CHANNELS_PATH = None  # optional JSON file path or env SPIKESORT_BAD_CHANNELS
 AUTO_BAD_CHANNELS = False  # auto-detect bad channels (merged with manual list; can be aggressive)
-AUTO_BAD_CHANNELS_METHOD = "std"  # "std" or "mad" are typical for tetrodes/stereotrodes
+AUTO_BAD_CHANNELS_METHOD = "std"  # "std" or "mad" are typical for tetrodes
 AUTO_BAD_CHANNELS_KWARGS = {}  # extra args passed to detect_bad_channels
 
 # Geometry/traceview display
@@ -115,12 +172,17 @@ TRACEVIEW_GROUP_SPACING_UM = 200.0
 LABEL_STEREOTRODES_AS_MUA = False  # set True to pre-label stereotrode groups as MUA; otherwise label in Phy
 STEREOTRODE_MUA_LABEL = "mua"
 DEFAULT_CLUSTER_LABEL = "unsorted"
+# Synthetic within-tetrode pitch for the 2x2/2x1 layout (geometry only).
+TETRODE_PITCH_UM = 20.0
+# Synthetic spacing between tetrodes in the bundle layout (only affects geometry/whitening/visualization).
+TETRODE_SPACING_DX_UM = 300.0
+TETRODE_SPACING_DY_UM = 300.0
 
 # Optional SI preprocessing: bandpass (+ optional notch/CAR/whitening).
 # When enabled, SC2 filtering/CMR are disabled, but SC2 still whitens internally.
 # OE raw data are typically int16; SI scaling/filtering/whitening outputs float32.
-USE_SI_PREPROCESS = True
-SI_BP_MIN_HZ = 150
+USE_SI_PREPROCESS = False
+SI_BP_MIN_HZ = 300
 SI_BP_MAX_HZ = 6000
 SI_BP_FTYPE = "bessel"
 SI_BP_ORDER = 2
@@ -136,8 +198,8 @@ SI_WHITEN_RADIUS_UM = 100.0  # used when SI_WHITEN_MODE == "local"
 
 # Optional SI common reference before SC2. SC2 preprocessing (when enabled) does its own bandpass/CMR/whitening.
 SI_APPLY_CAR = False
-# "group" -> per-group CAR; "global" -> CAR over all channels
-CAR_MODE = "group"
+# "tetrode" -> per-tetrode CAR; "global" -> CAR over all channels
+CAR_MODE = "global"
 CAR_OPERATOR = "median"  # "median" (robust) or "average"
 # Tetrodes: per-group median is common but can induce bipolar spikes with small/imbalanced groups; global is safer.
 
@@ -148,30 +210,15 @@ NOTCH_FREQUENCIES = [50, 100, 150]
 NOTCH_Q = 30
 
 # Optional bandpass copy for Phy/export (useful when SC2 preprocessing is enabled so Phy doesn't read raw).
-EXPORT_BANDPASS_FOR_PHY = True
-EXPORT_BP_MIN_HZ = 150
-EXPORT_BP_MAX_HZ = 6000
-EXPORT_BP_FTYPE = "bessel"
-EXPORT_BP_ORDER = 2
-EXPORT_BP_MARGIN_MS = 10
+# Common practice: Phy export is scaled + optionally bandpassed, but not whitened.
+EXPORT_BANDPASS_FOR_PHY = True  # set True for bandpassed export; False exports raw for comparison
+EXPORT_BP_MIN_HZ = SI_BP_MIN_HZ
+EXPORT_BP_MAX_HZ = SI_BP_MAX_HZ
+EXPORT_BP_FTYPE = SI_BP_FTYPE
+EXPORT_BP_ORDER = SI_BP_ORDER
+EXPORT_BP_MARGIN_MS = SI_BP_MARGIN_MS
 EXPORT_SCALE_TO_UV = True  # scale export recording to microvolts if gain info is present
 EXPORT_SPARSE_CHANNELS = 4  # placeholder for future Phy sparsity export (currently unused)
-
-# Analyzer/QC
-COMPUTE_QC_METRICS = True  # compute QC metrics on analyzer output
-QC_METRIC_NAMES = [
-    "firing_rate",
-    "presence_ratio",
-    "isi_violation",
-    "snr",
-    "amplitude_cutoff",
-]
-QC_PC_METRICS = {
-    "isolation_distance",
-    "l_ratio",
-    "d_prime",
-    "nearest_neighbor",
-}
 ANALYZER_FROM_SORTER = True  # use rec_sc2 for analyzer/QC (more faithful to sorter input)
 SAVE_ANALYZER = False  # persist analyzer to disk (binary_folder); set True for full runs
 REMOVE_REDUNDANT_UNITS = False  # optional post-sort curation step (remove near-duplicate units)
@@ -179,24 +226,27 @@ REDUNDANT_THRESHOLD = 0.95  # higher = stricter duplicate detection
 REDUNDANT_STRATEGY = "minimum_shift"  # curation strategy for duplicates
 
 # Optional overrides for SpykingCircus2 parameters (keys mirror default params structure)
+# Add tweaks here if you need to change SC2 defaults (filtering, thresholds, etc.).
 SC2_PARAM_OVERRIDES: dict = {
-    # Example tweaks:
-    # "filtering": {"freq_min": 300, "freq_max": 6000},
-    # "detection": {"method_kwargs": {"detect_threshold": 4}},
+    # Tetrodes/stereotrodes: disable motion correction (intended for dense probes).
+    "apply_motion_correction": False,
+    # Match native SC2 waveform window (N_t = 3 ms total).
+    "general": {
+        "ms_before": 1.0,
+        "ms_after": 2.0,
+    },
+    # Match native SC2 detection threshold and peak sign.
+    "detection": {
+        "method": "matched_filtering",
+        "method_kwargs": {
+            "peak_sign": "neg",
+            "detect_threshold": 6,
+        },
+    },
 }
 
 # Optional: print stack traces for warnings (debug-only).
 DEBUG_WARN_TRACE = False
-
-
-def enable_warning_trace(limit: int = 12) -> None:
-    def _showwarning(message, category, filename, lineno, file=None, line=None):
-        traceback.print_stack(limit=limit)
-        print(warnings.formatwarning(message, category, filename, lineno, line))
-
-    warnings.showwarning = _showwarning
-    warnings.simplefilter("always")
-
 # ---------------------------------------------------------------------
 # Pipeline helpers from Functions.pipeline_utils and Functions.si_utils.
 # ---------------------------------------------------------------------
@@ -222,6 +272,25 @@ def filter_groups_with_indices(groups: Iterable[Iterable], valid_ids: Sequence) 
             filtered.append(subset)
             indices.append(idx)
     return filtered, indices
+
+
+def attach_bundle_grid_geom(recording, ncols: int, dx_um: float, dy_um: float):
+    """Attach a simple grid geometry for bundle sorting (one group, N channels)."""
+    n_ch = recording.get_num_channels()
+    positions = np.zeros((n_ch, 2), dtype=float)
+    for idx in range(n_ch):
+        row = idx // ncols
+        col = idx % ncols
+        positions[idx] = (col * dx_um, row * dy_um)
+    probe = Probe(ndim=2)
+    probe.set_contacts(positions=positions, shapes="circle", shape_params={"radius": 7})
+    probe.set_device_channel_indices(np.arange(n_ch))
+    return recording.set_probe(probe, in_place=False)
+
+
+def enable_warning_trace(limit: int = 12) -> None:
+    """Enable stack traces for warnings to help debug pipeline warnings."""
+    warnings.showwarning = lambda *args, **kwargs: traceback.print_stack(limit=limit)
 
 
 def preprocess_for_sc2(recording, groups=None):
@@ -714,6 +783,26 @@ def main():
     if DEBUG_WARN_TRACE:
         enable_warning_trace()
 
+    env_groups_path = os.environ.get("SPIKESORT_CHANNEL_GROUPS", None)
+    env_bad_path = os.environ.get("SPIKESORT_BAD_CHANNELS", None)
+    config_dir = PROJECT_ROOT / "config"
+    if not args.channel_groups and not env_groups_path:
+        group_candidates = sorted(config_dir.glob("channel_groups_*.json"))
+        if group_candidates:
+            CHANNEL_GROUPS_PATH = _choose_config_json(
+                "channel groups",
+                group_candidates,
+                group_candidates[0] if len(group_candidates) == 1 else None,
+            )
+    if not args.bad_channels and not env_bad_path:
+        bad_candidates = sorted(config_dir.glob("bad_channels_*.json"))
+        if bad_candidates:
+            BAD_CHANNELS_PATH = _choose_config_json(
+                "bad channels",
+                bad_candidates,
+                bad_candidates[0] if len(bad_candidates) == 1 else None,
+            )
+
     root_dir = args.root_dir
     base_out = args.base_out
 
@@ -786,7 +875,6 @@ def main():
     channel_order = original_channel_order.copy()
 
     # Resolve manual group configuration (inline, env, or CLI file).
-    env_groups_path = os.environ.get("SPIKESORT_CHANNEL_GROUPS", None)
     manual_groups = CHANNEL_GROUPS
     groups_source = "inline CHANNEL_GROUPS"
 
@@ -827,7 +915,6 @@ def main():
     # Resolve bad channels (inline, env, or CLI file).
     bad_channels = BAD_CHANNELS
     bad_source = "inline BAD_CHANNELS"
-    env_bad_path = os.environ.get("SPIKESORT_BAD_CHANNELS", None)
     env_bad_loaded = load_bad_channels_from_path(env_bad_path) if env_bad_path else None
     if env_bad_loaded is not None:
         bad_channels = env_bad_loaded
@@ -891,12 +978,19 @@ def main():
     else:
         print(f"Groups: {len(groups)} (fallback chunking); first group: {groups[0] if groups else 'n/a'}")
 
+    bundle_grid = False
+    if (BUNDLE_GROUPING_MODE or "").lower() in ("single_grid", "grid", "single"):
+        bundle_grid = True
+        groups = [channel_order.copy()]
+        group_ids = [0]
+        print(f"Bundle grouping mode: single grid ({len(groups[0])} channels).")
+
     tetrode_offsets = None
     base_group_count = len(base_groups)
     tetrodes_per_row = max(1, int(np.ceil(np.sqrt(base_group_count)))) if base_group_count else 1
-    if groups:
-        dx = 150.0
-        dy = 150.0
+    if groups and not bundle_grid:
+        dx = TETRODE_SPACING_DX_UM
+        dy = TETRODE_SPACING_DY_UM
         num_rows = int(np.ceil(base_group_count / tetrodes_per_row))
         tetrode_offsets = []
         for orig_idx in filtered_indices:
@@ -907,14 +1001,19 @@ def main():
             tetrode_offsets.append((x, y))
 
     if ATTACH_GEOMETRY and groups:
-        recording = ensure_geom_and_units(
-            recording,
-            groups,
-            tetrodes_per_row=tetrodes_per_row,
-            tetrode_offsets=tetrode_offsets,
-            scale_to_uv=False,
-        )
-        print(f"Geometry attached to recording (tetrodes_per_row={tetrodes_per_row}).")
+        if bundle_grid:
+            recording = attach_bundle_grid_geom(recording, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+            print(f"Geometry attached to recording (bundle grid {BUNDLE_GRID_COLS} cols).")
+        else:
+            recording = ensure_geom_and_units(
+                recording,
+                groups,
+                pitch=TETRODE_PITCH_UM,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+            )
+            print(f"Geometry attached to recording (tetrodes_per_row={tetrodes_per_row}).")
 
     # Optional SI common median reference before SC2 (per group or global) when not using SI preprocessing
     if not USE_SI_PREPROCESS and SI_APPLY_CAR:
@@ -936,13 +1035,17 @@ def main():
     rec_sc2 = preprocess_for_sc2(recording, groups=groups)
 
     if ATTACH_GEOMETRY and groups:
-        rec_sc2 = ensure_geom_and_units(
-            rec_sc2,
-            groups,
-            tetrodes_per_row=tetrodes_per_row,
-            tetrode_offsets=tetrode_offsets,
-            scale_to_uv=False,
-        )
+        if bundle_grid:
+            rec_sc2 = attach_bundle_grid_geom(rec_sc2, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+        else:
+            rec_sc2 = ensure_geom_and_units(
+                rec_sc2,
+                groups,
+                pitch=TETRODE_PITCH_UM,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+            )
     if ATTACH_GEOMETRY and groups:
         try:
             rec_sc2 = ensure_probe_attached(rec_sc2)
@@ -954,13 +1057,17 @@ def main():
             rec_sc2 = rec_sc2.save(folder=preproc_folder, format="binary_folder", overwrite=True)
             print(f"Materialized rec_sc2 at {preproc_folder}")
             if ATTACH_GEOMETRY and groups:
-                rec_sc2 = ensure_geom_and_units(
-                    rec_sc2,
-                    groups,
-                    tetrodes_per_row=tetrodes_per_row,
-                    tetrode_offsets=tetrode_offsets,
-                    scale_to_uv=False,
-                )
+                if bundle_grid:
+                    rec_sc2 = attach_bundle_grid_geom(rec_sc2, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+                else:
+                    rec_sc2 = ensure_geom_and_units(
+                        rec_sc2,
+                        groups,
+                        pitch=TETRODE_PITCH_UM,
+                        tetrodes_per_row=tetrodes_per_row,
+                        tetrode_offsets=tetrode_offsets,
+                        scale_to_uv=False,
+                    )
         except Exception as exc:
             print(f"Warning: failed to materialize rec_sc2: {exc}")
 
@@ -1015,15 +1122,42 @@ def main():
         print(f"Export path: bandpass {EXPORT_BP_MIN_HZ}-{EXPORT_BP_MAX_HZ} Hz for Phy/GUI export.")
     if ATTACH_GEOMETRY and groups:
         try:
-            rec_export = ensure_geom_and_units(
-                rec_export,
-                groups,
-                tetrodes_per_row=tetrodes_per_row,
-                tetrode_offsets=tetrode_offsets,
-                scale_to_uv=False,
-            )
+            if bundle_grid:
+                rec_export = attach_bundle_grid_geom(
+                    rec_export, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM
+                )
+            else:
+                rec_export = ensure_geom_and_units(
+                    rec_export,
+                    groups,
+                    pitch=TETRODE_PITCH_UM,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                )
         except Exception as exc:
             print(f"Warning: failed to reattach geometry on export path: {exc}")
+    if MATERIALIZE_EXPORT:
+        try:
+            export_folder = SC2_OUT / "rec_export_prepared"
+            rec_export = rec_export.save(folder=export_folder, format="binary_folder", overwrite=True)
+            print(f"Materialized rec_export at {export_folder}")
+            if ATTACH_GEOMETRY and groups:
+                if bundle_grid:
+                    rec_export = attach_bundle_grid_geom(
+                        rec_export, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM
+                    )
+                else:
+                    rec_export = ensure_geom_and_units(
+                        rec_export,
+                        groups,
+                        pitch=TETRODE_PITCH_UM,
+                        tetrodes_per_row=tetrodes_per_row,
+                        tetrode_offsets=tetrode_offsets,
+                        scale_to_uv=False,
+                    )
+        except Exception as exc:
+            print(f"Warning: failed to materialize rec_export: {exc}")
     set_group_property(rec_export, groups, group_ids)
 
     if ANALYZER_FROM_SORTER:
@@ -1055,15 +1189,32 @@ def main():
                     print("Analyzer path: scaled rec_sc2 to microvolts for QC.")
         if ATTACH_GEOMETRY and groups:
             try:
-                rec_analyzer = ensure_geom_and_units(
-                    rec_analyzer,
-                    groups,
-                    tetrodes_per_row=tetrodes_per_row,
-                    tetrode_offsets=tetrode_offsets,
-                    scale_to_uv=False,
-                )
+                if bundle_grid:
+                    rec_analyzer = attach_bundle_grid_geom(
+                        rec_analyzer, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM
+                    )
+                else:
+                    rec_analyzer = ensure_geom_and_units(
+                        rec_analyzer,
+                        groups,
+                        pitch=TETRODE_PITCH_UM,
+                        tetrodes_per_row=tetrodes_per_row,
+                        tetrode_offsets=tetrode_offsets,
+                        scale_to_uv=False,
+                    )
             except Exception as exc:
                 print(f"Warning: failed to reattach geometry on analyzer path: {exc}")
+        if MATERIALIZE_EXPORT:
+            try:
+                analyzer_folder = SC2_OUT / "rec_analyzer_prepared"
+                rec_analyzer = rec_analyzer.save(
+                    folder=analyzer_folder,
+                    format="binary_folder",
+                    overwrite=True,
+                )
+                print(f"Materialized rec_analyzer at {analyzer_folder}")
+            except Exception as exc:
+                print(f"Warning: failed to materialize rec_analyzer: {exc}")
     else:
         rec_analyzer = rec_export
 
@@ -1153,7 +1304,6 @@ def main():
                 print("Warning: 'phy' command not found; skipping extract-waveforms.")
             except subprocess.CalledProcessError as exc:
                 print(f"Warning: phy extract-waveforms failed: {exc}")
-        print(f"Run: phy template-gui \"{params_py}\"")
     if si_gui_folder:
         print(f"Run: python -m spikeinterface_gui \"{si_gui_folder}\"")
 
