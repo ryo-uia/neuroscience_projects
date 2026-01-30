@@ -85,7 +85,7 @@ def _choose_config_json(label: str, candidates: list[Path], default_path: Path |
 # ---------------------------------------------------------------------
 
 # Session/data selection
-TEST_SECONDS = 600  # set to None for full recording
+TEST_SECONDS = 300  # set to None for full recording
 DEFAULT_ROOT_DIR = PROJECT_ROOT / "recordings"
 SESSION_SUBPATH = None  # provide relative Open Ephys path to skip auto-discovery
 SESSION_SELECTION = "prompt"  # always prompt for session selection
@@ -157,8 +157,8 @@ BUNDLE_GRID_DX_UM = 10.0  # bundle grid x-spacing (synthetic; mirrors .prb layou
 BUNDLE_GRID_DY_UM = 200.0  # bundle grid y-spacing (synthetic; mirrors .prb layout when single_grid)
 
 # Bad channels (use IDs to avoid positional mismatch across sessions or after slicing)
-#BAD_CHANNELS = ["CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"] #Tatsu
-BAD_CHANNELS = ["CH58", "CH64", "CH62", "CH60", "CH63", "CH61", "CH59", "CH57", "CH47", "CH45", "CH43", "CH41"] #Fuyu
+BAD_CHANNELS = ["CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"] #Tatsu
+#BAD_CHANNELS = ["CH58", "CH64", "CH62", "CH60", "CH63", "CH61", "CH59", "CH57", "CH47", "CH45", "CH43", "CH41"] #Fuyu
 BAD_CHANNELS_PATH = None  # optional JSON file path or env SPIKESORT_BAD_CHANNELS
 AUTO_BAD_CHANNELS = False  # auto-detect bad channels (merged with manual list; can be aggressive)
 AUTO_BAD_CHANNELS_METHOD = "std"  # "std" or "mad" are typical for tetrodes
