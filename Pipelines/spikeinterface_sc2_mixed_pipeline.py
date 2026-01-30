@@ -1133,13 +1133,14 @@ def main():
     analyzer_sc2 = maybe_remove_redundant_units(analyzer_sc2, "sc2")
 
     phy_folder = None
+    si_gui_folder = None
     group_vals = None
     if EXPORT_TO_PHY:
         phy_folder, group_vals = export_for_phy(
             analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map, group_ids, group_sizes_by_id
         )
     if EXPORT_TO_SI_GUI:
-        export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
+        si_gui_folder = export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
 
     print("SC2 pipeline complete.")
     if phy_folder:
@@ -1153,6 +1154,8 @@ def main():
             except subprocess.CalledProcessError as exc:
                 print(f"Warning: phy extract-waveforms failed: {exc}")
         print(f"Run: phy template-gui \"{params_py}\"")
+    if si_gui_folder:
+        print(f"Run: python -m spikeinterface_gui \"{si_gui_folder}\"")
 
 if __name__ == "__main__":
     main()
