@@ -37,6 +37,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from Functions.si_utils import ensure_geom_and_units, ensure_probe_attached, set_group_property
 from Functions.pipeline_utils import (
+    choose_config_json,
     choose_recording_folder,
     chunk_groups,
     detect_bad_channel_ids,
@@ -50,35 +51,6 @@ from Functions.pipeline_utils import (
     safe_channel_slice,
     safe_rmtree,
 )
-
-# ---------------------------------------------------------------------
-# Config selection helpers (optional prompts)
-# ---------------------------------------------------------------------
-
-def _choose_config_json(label: str, candidates: list[Path], default_path: Path | None) -> Path | None:
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    default_idx = 0
-    if default_path in candidates:
-        default_idx = candidates.index(default_path)
-    print(f"Available {label} JSON files:")
-    for idx, path in enumerate(candidates):
-        print(f"  [{idx}] {path}")
-    try:
-        resp = input(f"Select {label} JSON index [default {default_idx}]: ").strip()
-    except EOFError:
-        return candidates[default_idx]
-    if resp == "":
-        return candidates[default_idx]
-    try:
-        idx = int(resp)
-    except ValueError:
-        return candidates[default_idx]
-    if 0 <= idx < len(candidates):
-        return candidates[idx]
-    return candidates[default_idx]
 
 # ---------------------------------------------------------------------
 # User configuration
@@ -766,7 +738,7 @@ def main():
     if not args.channel_groups and not env_groups_path:
         group_candidates = sorted(config_dir.glob("channel_groups_*.json"))
         if group_candidates:
-            CHANNEL_GROUPS_PATH = _choose_config_json(
+            CHANNEL_GROUPS_PATH = choose_config_json(
                 "channel groups",
                 group_candidates,
                 group_candidates[0] if len(group_candidates) == 1 else None,
@@ -774,7 +746,7 @@ def main():
     if not args.bad_channels and not env_bad_path:
         bad_candidates = sorted(config_dir.glob("bad_channels_*.json"))
         if bad_candidates:
-            BAD_CHANNELS_PATH = _choose_config_json(
+            BAD_CHANNELS_PATH = choose_config_json(
                 "bad channels",
                 bad_candidates,
                 bad_candidates[0] if len(bad_candidates) == 1 else None,
