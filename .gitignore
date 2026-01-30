@@ -221,3 +221,4 @@ si_gui_exports/
 *.bin
 *.npy
 *.npz
+SpikeSorting/**/traces_cached_seg*.raw
