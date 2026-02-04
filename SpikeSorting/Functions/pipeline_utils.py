@@ -51,6 +51,32 @@ def pick_stream(data_path: Path, preferred: str | None) -> str:
     return neural[0]
 
 
+def choose_config_json(label: str, candidates: list[Path], default_path: Path | None) -> Path | None:
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    default_idx = 0
+    if default_path in candidates:
+        default_idx = candidates.index(default_path)
+    print(f"Available {label} JSON files:")
+    for idx, path in enumerate(candidates):
+        print(f"  [{idx}] {path}")
+    try:
+        resp = input(f"Select {label} JSON index [default {default_idx}]: ").strip()
+    except EOFError:
+        return candidates[default_idx]
+    if resp == "":
+        return candidates[default_idx]
+    try:
+        idx = int(resp)
+    except ValueError:
+        return candidates[default_idx]
+    if 0 <= idx < len(candidates):
+        return candidates[idx]
+    return candidates[default_idx]
+
+
 def first_seconds(recording, seconds: int | None):
     if seconds is None:
         return recording
