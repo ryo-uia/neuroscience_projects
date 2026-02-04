@@ -56,8 +56,27 @@ from Functions.pipeline_utils import (
 # User configuration
 # ---------------------------------------------------------------------
 
+# Workflow notes
+# - Primary workflow: run this pipeline, then curate units in Phy.
+# - Optional assistant workflow: use SpikeAgent after Phy curation.
+# Recommended tetrode baseline (starting point)
+# - USE_SI_PREPROCESS=True, SI_BP_MIN_HZ=300, SI_BP_MAX_HZ=6000
+# - SI_APPLY_CAR=False for independent tetrodes; test True only if shared noise is strong.
+# - SI_APPLY_WHITEN=False (SC2 applies whitening internally).
+# - SORT_BY_GROUP=False for bundle sorting; set True for strict per-tetrode sorting.
+# - SC2 detection threshold: keep detect_threshold around 5-6; increase if false positives are high.
+# - EXPORT_PHY_CHANNEL_IDS_MODE="oe_label" for easiest channel traceability after curation.
+# - Runtime workflow: tune with TEST_SECONDS=300-600, then run TEST_SECONDS=None for final exports.
+# - Validation workflow: benchmark bundle mode first, then cross-check selected sessions with SORT_BY_GROUP=True.
+# - Suggested config order: BAD_CHANNELS/CHANNEL_GROUPS -> preprocessing flags -> export options.
+# SpikeAgent launch (Windows PowerShell)
+#   1) cd C:\Users\ryoi\Documents\Code\SpikeSorting\docker\spikeagent
+#   2) .\run_spikeagent_cpu.ps1 -DataPath "C:\Users\ryoi\Documents\Code\SpikeSorting\recordings" -ResultsPath "C:\Users\ryoi\Documents\Code\SpikeSorting\sc2_outputs"
+#   3) Open http://127.0.0.1:8501
+# - Stop with Ctrl+C in that terminal; rerun steps 1-3 next session.
+
 # Session/data selection
-TEST_SECONDS = 600  # None=full recording
+TEST_SECONDS = 600  # None=full recording (use 300-600 for quick QC runs)
 DEFAULT_ROOT_DIR = PROJECT_ROOT / "recordings"  # recordings root
 SESSION_SUBPATH = None  # Optional: relative Open Ephys path to skip auto-discovery
 SESSION_SELECTION = "prompt"  # session selection strategy ("prompt" recommended)
@@ -82,7 +101,7 @@ EXPORT_PHY_CHANNEL_IDS_MODE = "oe_label"  # labels in Phy export metadata: oe_in
 MATERIALIZE_EXPORT = False  # True=save rec_export to disk before analyzer/export (faster reuse; uses extra space); False=in-memory
 
 # Analyzer/QC
-COMPUTE_QC_METRICS = True  # True=compute QC metrics on analyzer output; False=skip
+COMPUTE_QC_METRICS = True  # True=compute QC metrics on analyzer output; False=skip (PC metrics can add noticeable runtime)
 QC_METRIC_NAMES = [  # QC metrics that do not require PCs
     "firing_rate",
     "presence_ratio",
@@ -103,9 +122,10 @@ QC_PC_METRICS = {  # QC metrics that require PCs
 # Channel grouping (tetrodes)
 CHANNELS_PER_TETRODE = 4  # used for auto-grouping when no explicit groups
 # Config JSON discovery/prompting
-USE_CONFIG_JSONS = False  # True=prompt for config/*.json channel groups + bad channels; False=skip
+USE_CONFIG_JSONS = False  # True=prompt for config/*.json channel groups + bad channels; False=skip (enable only for interactive JSON selection)
 # Optional explicit channel grouping. If set, this fixed map is used instead of chunking by order
 # (prevents shifts after bad-channel removal).
+# Every kept channel should appear exactly once across groups.
 CHANNEL_GROUPS: list[list[int | str]] = [
     ["CH40", "CH38", "CH36", "CH34"],  # TT1A-D
     ["CH48", "CH46", "CH44", "CH42"],  # TT2A-D
@@ -134,7 +154,7 @@ BUNDLE_GRID_COLS = 4  # columns for single-grid bundle layout
 BUNDLE_GRID_DX_UM = 10.0  # bundle grid x-spacing (synthetic; mirrors .prb layout when single_grid)
 BUNDLE_GRID_DY_UM = 200.0  # bundle grid y-spacing (synthetic; mirrors .prb layout when single_grid)
 
-# Bad channels (use IDs to avoid positional mismatch across sessions or after slicing; set [] for none)
+# Bad channels (use OE channel IDs like CH## to avoid positional mismatch across sessions or after slicing; set [] for none)
 #BAD_CHANNELS = ["CH7", "CH2", "CH26", "CH4", "CH42", "CH50", "CH51", "CH52", "CH54", "CH56", "CH6", "CH8"] #Tatsu
 BAD_CHANNELS = ["CH58", "CH64", "CH62", "CH60", "CH63", "CH61", "CH59", "CH57", "CH47", "CH45", "CH43", "CH41"] #Fuyu
 BAD_CHANNELS_PATH = None  # Optional: JSON file path or env SPIKESORT_BAD_CHANNELS (None=ignore)
@@ -167,9 +187,6 @@ MATERIALIZE_SI_PREPROCESS = False  # True=save preprocessed rec_sc2 to disk (fas
 SI_APPLY_WHITEN = False  # True=apply SI whitening when USE_SI_PREPROCESS=True (double-whitening); False=skip
 SI_WHITEN_MODE = "local"  # "global" or "local"
 SI_WHITEN_RADIUS_UM = 100.0  # used when SI_WHITEN_MODE == "local"
-# Tetrodes: prefer local whitening if geometry is attached; use global if locations are missing.
-# Note: the current SpikeInterface SC2 wrapper always applies SC2 whitening; there is no
-# reliable disable flag in this version.
 
 # Optional SI common reference before SC2. SC2 preprocessing (when enabled) does its own bandpass/CMR/whitening.
 SI_APPLY_CAR = False  # True=enable common average reference; False=skip
