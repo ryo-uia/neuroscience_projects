@@ -5,6 +5,7 @@ Minimal SpikeInterface pipeline to run SpykingCircus2 on tetrode/stereotrode rec
 from __future__ import annotations
 
 import argparse
+import atexit
 import os
 import re
 import shutil
@@ -149,12 +150,17 @@ CHANNEL_GROUPS: list[list[int | str]] = [
 ]
 CHANNEL_GROUPS_PATH = None  # Optional: JSON file path or env SPIKESORT_CHANNEL_GROUPS (None=ignore)
 STRICT_GROUPS = True  # True=error if no valid groups; False=chunk by order
-# Optional: bundle sorting option (single group with grid geometry, similar to .prb layout).
+# Optional: bundle layout (geometry only). Does NOT change grouping/sorting mode.
 BUNDLE_GROUPING_MODE = "tetrode"  # "tetrode" (default) or "single_grid"
 # When "tetrode", the bundle grid settings below are ignored.
 BUNDLE_GRID_COLS = 4  # columns for single-grid bundle layout
 BUNDLE_GRID_DX_UM = 10.0  # bundle grid x-spacing (synthetic; mirrors .prb layout when single_grid)
 BUNDLE_GRID_DY_UM = 200.0  # bundle grid y-spacing (synthetic; mirrors .prb layout when single_grid)
+#
+# Sorting vs grouping (mixed):
+# - Mixed pipeline runs a single SC2 bundle by design.
+# - CHANNEL_GROUPS still define tetrodes/stereotrodes for geometry/CAR/labels.
+# - BUNDLE_GROUPING_MODE only affects geometry when bundling (single_grid is layout-only).
 
 # Bad channels (use OE channel IDs like CH## to avoid positional mismatch across sessions or after slicing; set [] for none)
 BAD_CHANNELS = []
@@ -165,6 +171,8 @@ AUTO_BAD_CHANNELS_KWARGS = {}  # only used when AUTO_BAD_CHANNELS=True; extra ar
 
 # Geometry/traceview display
 ATTACH_GEOMETRY = True  # True=attach probe geometry to recording; False=skip
+# Note: some internal SI/SC2 wrapper objects may still emit "no Probe attached; creating dummy"
+# warnings even when the main recording has probe geometry attached.
 LINEARIZE_TRACEVIEW = True  # True=flatten groups for traceview display; False=keep group layout
 TRACEVIEW_CONTACT_SPACING_UM = 20.0  # spacing between contacts in traceview
 TRACEVIEW_GROUP_SPACING_UM = 200.0  # spacing between groups in traceview
@@ -233,6 +241,11 @@ SC2_PARAM_OVERRIDES: dict = {  # {}=use SC2 defaults
         "ms_before": 1.0,
         "ms_after": 2.0,
     },
+    # SC2 internal filtering (only used when SC2 preprocessing is enabled).
+    "filtering": {
+        "freq_min": SI_BP_MIN_HZ,
+        "freq_max": SI_BP_MAX_HZ,
+    },
     # Match native SC2 detection threshold and peak sign.
     "detection": {
         "method": "matched_filtering",
@@ -245,20 +258,10 @@ SC2_PARAM_OVERRIDES: dict = {  # {}=use SC2 defaults
 
 # Optional: print stack traces for warnings (debug-only).
 DEBUG_WARN_TRACE = False  # print stack traces for warnings (debug)
+DEBUG_GEOMETRY_ATTACH = False  # log each geometry attach/reattach (debug)
 # ---------------------------------------------------------------------
 # Pipeline helpers from Functions.pipeline_utils and Functions.si_utils.
 # ---------------------------------------------------------------------
-
-
-def filter_groups_by_channels(groups: Iterable[Iterable], valid_ids: Sequence) -> List[List]:
-    """Filter each group to channels that exist in valid_ids, dropping empty groups."""
-    valid_set = set(valid_ids)
-    filtered: List[List] = []
-    for group in groups:
-        subset = [ch for ch in group if ch in valid_set]
-        if subset:
-            filtered.append(subset)
-    return filtered
 
 
 def filter_groups_with_indices(groups: Iterable[Iterable], valid_ids: Sequence) -> tuple[List[List], List[int]]:
@@ -288,9 +291,44 @@ def attach_bundle_grid_geom(recording, ncols: int, dx_um: float, dy_um: float):
     return recording.set_probe(probe, in_place=False)
 
 
+def attach_geometry_if_needed(
+    recording,
+    groups,
+    *,
+    bundle_grid: bool,
+    tetrodes_per_row: int,
+    tetrode_offsets,
+    scale_to_uv: bool = False,
+    label: str | None = None,
+):
+    """Attach probe geometry if enabled, preserving existing scale when requested."""
+    if not ATTACH_GEOMETRY or not groups:
+        return recording
+    if bundle_grid:
+        out = attach_bundle_grid_geom(recording, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
+    else:
+        out = ensure_geom_and_units(
+            recording,
+            groups,
+            pitch=TETRODE_PITCH_UM,
+            tetrodes_per_row=tetrodes_per_row,
+            tetrode_offsets=tetrode_offsets,
+            scale_to_uv=scale_to_uv,
+        )
+    if DEBUG_GEOMETRY_ATTACH:
+        label_text = f" ({label})" if label else ""
+        print(f"Geometry attach{label_text}: bundle_grid={bundle_grid}, groups={len(groups)}.")
+    return out
+
+
 def enable_warning_trace(limit: int = 12) -> None:
-    """Enable stack traces for warnings to help debug pipeline warnings."""
-    warnings.showwarning = lambda *args, **kwargs: traceback.print_stack(limit=limit)
+    """Install a warning hook that prints a short traceback (debug-only)."""
+    def _showwarning(message, category, filename, lineno, file=None, line=None):
+        traceback.print_stack(limit=limit)
+        print(warnings.formatwarning(message, category, filename, lineno, line))
+
+    warnings.showwarning = _showwarning
+    warnings.simplefilter("always")
 
 
 def preprocess_for_sc2(recording, groups=None):
@@ -369,6 +407,7 @@ def build_analyzer(
 ):
     """Create a SortingAnalyzer, compute waveforms/PCs/QC, and optionally save outputs."""
     folder = base_folder / f"analyzer_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    qc_metrics_path = None
     try:
         recording = ensure_probe_attached(recording)
         print("Analyzer recording probe attached.")
@@ -427,6 +466,7 @@ def build_analyzer(
                     out_path.parent.mkdir(parents=True, exist_ok=True)
                     qm.to_csv(out_path)
                     print(f"QC metrics saved: {out_path}")
+                    qc_metrics_path = out_path
                 except Exception as exc:
                     print(f"WARNING: QC metrics save failed: {exc}")
                 qc_done = True
@@ -450,10 +490,13 @@ def build_analyzer(
                         out_path.parent.mkdir(parents=True, exist_ok=True)
                         qm.to_csv(out_path)
                         print(f"QC metrics saved: {out_path}")
+                        qc_metrics_path = out_path
                     except Exception as exc:
                         print(f"WARNING: QC metrics save failed: {exc}")
                 except Exception as exc:
                     print(f"WARNING: QC metrics failed: {exc}")
+    if qc_metrics_path is not None:
+        setattr(analyzer, "_qc_metrics_path", str(qc_metrics_path))
     print(f"Analyzer computed for {label} at {folder}")
     return analyzer
 
@@ -524,6 +567,7 @@ def export_for_phy(
     original_index_map: dict,
     group_ids=None,
     group_sizes_by_id=None,
+    recording_override=None,
 ):
     """Export Phy folder and (when requested) rewrite channel_ids in params.py."""
     folder = base_folder / f"phy_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -535,7 +579,38 @@ def export_for_phy(
         copy_binary=True,
         sparsity=export_sparsity,
     )
-    export_to_phy(analyzer, **export_kwargs)
+    export_recording = analyzer.recording
+    export_source = "analyzer.recording"
+    if recording_override is not None:
+        try:
+            export_to_phy(analyzer, recording=recording_override, **export_kwargs)
+            export_recording = recording_override
+            export_source = "recording_override"
+        except TypeError as exc:
+            # Back-compat for older SI versions: export_to_phy(recording, sorting, ...)
+            try:
+                export_to_phy(recording_override, analyzer.sorting, **export_kwargs)
+                export_recording = recording_override
+                export_source = "recording_override (legacy)"
+            except Exception:
+                print(f"WARNING: export with recording_override failed; falling back to analyzer ({exc})")
+                export_to_phy(analyzer, **export_kwargs)
+                export_source = "analyzer.recording (fallback)"
+        except Exception as exc:
+            print(f"WARNING: export with recording_override failed; falling back to analyzer ({exc})")
+            export_to_phy(analyzer, **export_kwargs)
+            export_source = "analyzer.recording (fallback)"
+    else:
+        export_to_phy(analyzer, **export_kwargs)
+    print(
+        f"Phy export source: {export_source} | scaled_to_uV={EXPORT_SCALE_TO_UV} | "
+        f"bandpass_for_phy={EXPORT_BANDPASS_FOR_PHY}"
+    )
+    if EXPORT_BANDPASS_FOR_PHY and export_source != "recording_override":
+        print(
+            "WARNING: EXPORT_BANDPASS_FOR_PHY=True but Phy export used analyzer.recording; "
+            "bandpass export may be bypassed."
+        )
     if SIMPLE_PHY_EXPORT is None:
         simple_flag = groups is not None and len(groups) <= 1
     else:
@@ -549,12 +624,12 @@ def export_for_phy(
     if cache_dir.exists():
         shutil.rmtree(cache_dir, ignore_errors=True)
 
-    channel_ids_rec = list(analyzer.recording.channel_ids)
+    channel_ids_rec = list(export_recording.channel_ids)
     group_unique = None
     try:
-        group_prop_check = analyzer.recording.get_property("group")
+        group_prop_check = export_recording.get_property("group")
         if group_prop_check is None:
-            print("WARNING: analyzer has no 'group' property.")
+            print("WARNING: export recording has no 'group' property.")
         else:
             group_unique = np.unique(group_prop_check)
     except Exception as exc:
@@ -579,8 +654,8 @@ def export_for_phy(
     if export_ids_mode == "oe_label":
         labels = None
         try:
-            if "channel_name" in analyzer.recording.get_property_keys():
-                labels = list(analyzer.recording.get_property("channel_name"))
+            if "channel_name" in export_recording.get_property_keys():
+                labels = list(export_recording.get_property("channel_name"))
         except Exception:
             labels = None
         if not labels:
@@ -798,6 +873,60 @@ def export_for_si_gui(analyzer, base_folder: Path, label: str):
     return folder
 
 
+class TeeStream:
+    """Duplicate writes to multiple streams (stdout/stderr + log file)."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, data):
+        for stream in self._streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self._streams:
+            stream.flush()
+
+    def isatty(self):
+        return bool(self._streams) and hasattr(self._streams[0], "isatty") and self._streams[0].isatty()
+
+
+def reserve_run_folder(base_out: Path) -> Path:
+    """Reserve a unique run folder path under sc2_outputs for this invocation."""
+    out_root = base_out / "sc2_outputs"
+    out_root.mkdir(parents=True, exist_ok=True)
+    run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_folder = out_root / f"sc2_run_{run_tag}"
+    suffix = 1
+    while run_folder.exists():
+        run_folder = out_root / f"sc2_run_{run_tag}_{suffix:02d}"
+        suffix += 1
+    return run_folder
+
+
+def enable_run_logging(log_path: Path):
+    """Mirror stdout/stderr to a per-run log file."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = TeeStream(sys.stdout, handle)
+    sys.stderr = TeeStream(sys.stderr, handle)
+    return handle
+
+
+def disable_run_logging(handle):
+    """Restore stdout/stderr and close the log handle."""
+    if isinstance(sys.stdout, TeeStream):
+        sys.stdout = sys.stdout._streams[0]
+    if isinstance(sys.stderr, TeeStream):
+        sys.stderr = sys.stderr._streams[0]
+    if handle:
+        try:
+            handle.flush()
+        finally:
+            handle.close()
+
+
 # ---------------------------------------------------------------------
 # Main pipeline flow
 # ---------------------------------------------------------------------
@@ -834,6 +963,11 @@ def main():
         action="store_true",
         help="Skip auto-prompting for config/*.json channel group/bad-channel files.",
     )
+    parser.add_argument(
+        "--dry-run-config",
+        action="store_true",
+        help="Resolve config/session/groups/bad channels and exit before geometry/preprocessing/sorting/export.",
+    )
     args = parser.parse_args()
 
     if DEBUG_WARN_TRACE:
@@ -843,21 +977,22 @@ def main():
     env_groups_path = os.environ.get("SPIKESORT_CHANNEL_GROUPS", None)
     env_bad_path = os.environ.get("SPIKESORT_BAD_CHANNELS", None)
     config_dir = PROJECT_ROOT / "config"
-    CHANNEL_GROUPS_PATH = None
-    BAD_CHANNELS_PATH = None
+    # Start from module-level defaults (inline JSON paths), then override via env/CLI/prompt.
+    channel_groups_path = CHANNEL_GROUPS_PATH
+    bad_channels_path = BAD_CHANNELS_PATH
     use_config_jsons = USE_CONFIG_JSONS and not args.no_config_json
-    if use_config_jsons and not args.channel_groups and not env_groups_path:
+    if use_config_jsons and not args.channel_groups and not env_groups_path and not channel_groups_path:
         group_candidates = sorted(config_dir.glob("channel_groups_*.json"))
         if group_candidates:
-            CHANNEL_GROUPS_PATH = choose_config_json(
+            channel_groups_path = choose_config_json(
                 "channel groups",
                 group_candidates,
                 group_candidates[0] if len(group_candidates) == 1 else None,
             )
-    if use_config_jsons and not args.bad_channels and not env_bad_path:
+    if use_config_jsons and not args.bad_channels and not env_bad_path and not bad_channels_path:
         bad_candidates = sorted(config_dir.glob("bad_channels_*.json"))
         if bad_candidates:
-            BAD_CHANNELS_PATH = choose_config_json(
+            bad_channels_path = choose_config_json(
                 "bad channels",
                 bad_candidates,
                 bad_candidates[0] if len(bad_candidates) == 1 else None,
@@ -865,6 +1000,7 @@ def main():
 
     root_dir = args.root_dir
     base_out = args.base_out
+    sc2_run = reserve_run_folder(base_out)
 
     # Output folders (shared across runs).
     global SC2_OUT, SI_GUI_OUT
@@ -874,6 +1010,10 @@ def main():
     SC2_OUT.mkdir(parents=True, exist_ok=True)
     if EXPORT_TO_SI_GUI:
         SI_GUI_OUT.mkdir(parents=True, exist_ok=True)
+    run_log_path = SC2_OUT / "run_logs" / f"{sc2_run.name}.log"
+    _run_log_handle = enable_run_logging(run_log_path)
+    atexit.register(disable_run_logging, _run_log_handle)
+    print(f"Run log: {run_log_path}")
 
     # Echo config for reproducibility.
     print(
@@ -946,16 +1086,16 @@ def main():
     manual_groups = CHANNEL_GROUPS
     groups_source = "inline CHANNEL_GROUPS"
 
-    # Priority: CLI > config > env > inline.
+    # Priority: CLI > env > config > inline.
+    config_loaded = load_channel_groups_from_path(channel_groups_path) if channel_groups_path else None
+    if config_loaded:
+        manual_groups = config_loaded
+        groups_source = f"config CHANNEL_GROUPS_PATH {channel_groups_path}"
+
     env_loaded = load_channel_groups_from_path(env_groups_path) if env_groups_path else None
     if env_loaded:
         manual_groups = env_loaded
         groups_source = f"env file {env_groups_path}"
-
-    config_loaded = load_channel_groups_from_path(CHANNEL_GROUPS_PATH) if CHANNEL_GROUPS_PATH else None
-    if config_loaded:
-        manual_groups = config_loaded
-        groups_source = f"config CHANNEL_GROUPS_PATH {CHANNEL_GROUPS_PATH}"
 
     cli_loaded = load_channel_groups_from_path(args.channel_groups) if args.channel_groups else None
     if cli_loaded:
@@ -985,14 +1125,14 @@ def main():
     # Resolve bad channels (inline, env, or CLI file).
     bad_channels = BAD_CHANNELS
     bad_source = "inline BAD_CHANNELS"
+    config_bad_loaded = load_bad_channels_from_path(bad_channels_path) if bad_channels_path else None
+    if config_bad_loaded is not None:
+        bad_channels = config_bad_loaded
+        bad_source = f"config BAD_CHANNELS_PATH {bad_channels_path}"
     env_bad_loaded = load_bad_channels_from_path(env_bad_path) if env_bad_path else None
     if env_bad_loaded is not None:
         bad_channels = env_bad_loaded
         bad_source = f"env file {env_bad_path}"
-    config_bad_loaded = load_bad_channels_from_path(BAD_CHANNELS_PATH) if BAD_CHANNELS_PATH else None
-    if config_bad_loaded is not None:
-        bad_channels = config_bad_loaded
-        bad_source = f"config BAD_CHANNELS_PATH {BAD_CHANNELS_PATH}"
     cli_bad_loaded = load_bad_channels_from_path(args.bad_channels) if args.bad_channels else None
     if cli_bad_loaded is not None:
         bad_channels = cli_bad_loaded
@@ -1069,6 +1209,11 @@ def main():
         groups = [channel_order.copy()]
         group_ids = [0]
         print(f"Bundle grouping mode: single grid ({len(groups[0])} channels).")
+    if args.dry_run_config:
+        print("Dry-run complete: configuration resolved.")
+        print(f"Planned SC2 run folder: {sc2_run}")
+        print("Exiting before geometry/preprocessing/sorting/export.")
+        return
 
     tetrode_offsets = None
     base_group_count = len(base_groups)
@@ -1088,18 +1233,18 @@ def main():
     print("---- Geometry ----")
     # Attach probe geometry for downstream layout-aware steps.
     if ATTACH_GEOMETRY and groups:
+        recording = attach_geometry_if_needed(
+            recording,
+            groups,
+            bundle_grid=bundle_grid,
+            tetrodes_per_row=tetrodes_per_row,
+            tetrode_offsets=tetrode_offsets,
+            scale_to_uv=False,
+            label="recording",
+        )
         if bundle_grid:
-            recording = attach_bundle_grid_geom(recording, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
             print(f"Geometry attached to recording (bundle grid {BUNDLE_GRID_COLS} cols).")
         else:
-            recording = ensure_geom_and_units(
-                recording,
-                groups,
-                pitch=TETRODE_PITCH_UM,
-                tetrodes_per_row=tetrodes_per_row,
-                tetrode_offsets=tetrode_offsets,
-                scale_to_uv=False,
-            )
             print(f"Geometry attached to recording (tetrodes_per_row={tetrodes_per_row}).")
 
     # Optional SI common median reference before SC2 (per group or global) when not using SI preprocessing.
@@ -1124,17 +1269,15 @@ def main():
     rec_sc2 = preprocess_for_sc2(recording, groups=groups)
 
     if ATTACH_GEOMETRY and groups:
-        if bundle_grid:
-            rec_sc2 = attach_bundle_grid_geom(rec_sc2, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
-        else:
-            rec_sc2 = ensure_geom_and_units(
-                rec_sc2,
-                groups,
-                pitch=TETRODE_PITCH_UM,
-                tetrodes_per_row=tetrodes_per_row,
-                tetrode_offsets=tetrode_offsets,
-                scale_to_uv=False,
-            )
+        rec_sc2 = attach_geometry_if_needed(
+            rec_sc2,
+            groups,
+            bundle_grid=bundle_grid,
+            tetrodes_per_row=tetrodes_per_row,
+            tetrode_offsets=tetrode_offsets,
+            scale_to_uv=False,
+            label="rec_sc2",
+        )
     if ATTACH_GEOMETRY and groups:
         try:
             # Note: SC2 can still warn about missing probes in internal snippet wrappers;
@@ -1149,17 +1292,15 @@ def main():
             rec_sc2 = rec_sc2.save(folder=preproc_folder, format="binary_folder", overwrite=True)
             print(f"Materialized rec_sc2 at {preproc_folder}")
             if ATTACH_GEOMETRY and groups:
-                if bundle_grid:
-                    rec_sc2 = attach_bundle_grid_geom(rec_sc2, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM)
-                else:
-                    rec_sc2 = ensure_geom_and_units(
-                        rec_sc2,
-                        groups,
-                        pitch=TETRODE_PITCH_UM,
-                        tetrodes_per_row=tetrodes_per_row,
-                        tetrode_offsets=tetrode_offsets,
-                        scale_to_uv=False,
-                    )
+                rec_sc2 = attach_geometry_if_needed(
+                    rec_sc2,
+                    groups,
+                    bundle_grid=bundle_grid,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                    label="rec_sc2 (materialized)",
+                )
         except Exception as exc:
             print(f"WARNING: failed to materialize rec_sc2: {exc}")
 
@@ -1218,19 +1359,15 @@ def main():
         print(f"Export path: bandpass {EXPORT_BP_MIN_HZ}-{EXPORT_BP_MAX_HZ} Hz for Phy/GUI export.")
     if ATTACH_GEOMETRY and groups:
         try:
-            if bundle_grid:
-                rec_export = attach_bundle_grid_geom(
-                    rec_export, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM
-                )
-            else:
-                rec_export = ensure_geom_and_units(
-                    rec_export,
-                    groups,
-                    pitch=TETRODE_PITCH_UM,
-                    tetrodes_per_row=tetrodes_per_row,
-                    tetrode_offsets=tetrode_offsets,
-                    scale_to_uv=False,
-                )
+            rec_export = attach_geometry_if_needed(
+                rec_export,
+                groups,
+                bundle_grid=bundle_grid,
+                tetrodes_per_row=tetrodes_per_row,
+                tetrode_offsets=tetrode_offsets,
+                scale_to_uv=False,
+                label="rec_export",
+            )
         except Exception as exc:
             print(f"WARNING: failed to reattach geometry on export path: {exc}")
     if MATERIALIZE_EXPORT:
@@ -1239,19 +1376,15 @@ def main():
             rec_export = rec_export.save(folder=export_folder, format="binary_folder", overwrite=True)
             print(f"Materialized rec_export at {export_folder}")
             if ATTACH_GEOMETRY and groups:
-                if bundle_grid:
-                    rec_export = attach_bundle_grid_geom(
-                        rec_export, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM
-                    )
-                else:
-                    rec_export = ensure_geom_and_units(
-                        rec_export,
-                        groups,
-                        pitch=TETRODE_PITCH_UM,
-                        tetrodes_per_row=tetrodes_per_row,
-                        tetrode_offsets=tetrode_offsets,
-                        scale_to_uv=False,
-                    )
+                rec_export = attach_geometry_if_needed(
+                    rec_export,
+                    groups,
+                    bundle_grid=bundle_grid,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                    label="rec_export (materialized)",
+                )
         except Exception as exc:
             print(f"WARNING: failed to materialize rec_export: {exc}")
     set_group_property(rec_export, groups, group_ids)
@@ -1285,19 +1418,15 @@ def main():
                     print("Analyzer path: scaled rec_sc2 to microvolts for QC.")
         if ATTACH_GEOMETRY and groups:
             try:
-                if bundle_grid:
-                    rec_analyzer = attach_bundle_grid_geom(
-                        rec_analyzer, BUNDLE_GRID_COLS, BUNDLE_GRID_DX_UM, BUNDLE_GRID_DY_UM
-                    )
-                else:
-                    rec_analyzer = ensure_geom_and_units(
-                        rec_analyzer,
-                        groups,
-                        pitch=TETRODE_PITCH_UM,
-                        tetrodes_per_row=tetrodes_per_row,
-                        tetrode_offsets=tetrode_offsets,
-                        scale_to_uv=False,
-                    )
+                rec_analyzer = attach_geometry_if_needed(
+                    rec_analyzer,
+                    groups,
+                    bundle_grid=bundle_grid,
+                    tetrodes_per_row=tetrodes_per_row,
+                    tetrode_offsets=tetrode_offsets,
+                    scale_to_uv=False,
+                    label="rec_analyzer",
+                )
             except Exception as exc:
                 print(f"WARNING: failed to reattach geometry on analyzer path: {exc}")
         if MATERIALIZE_EXPORT:
@@ -1316,8 +1445,7 @@ def main():
 
     print("---- Sorting ----")
     # Run SC2 on the mixed bundle (single run).
-    sc2_run = SC2_OUT / f"sc2_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    safe_rmtree(sc2_run)
+    # Uses the pre-reserved run folder created at startup.
 
     set_group_property(rec_sc2, groups, group_ids)
     sc2_defaults = ss.Spykingcircus2Sorter.default_params()
@@ -1388,16 +1516,30 @@ def main():
     group_vals = None
     if EXPORT_TO_PHY:
         phy_folder, group_vals = export_for_phy(
-            analyzer_sc2, SC2_OUT, "sc2", groups, original_index_map, group_ids, group_sizes_by_id
+            analyzer_sc2,
+            SC2_OUT,
+            "sc2",
+            groups,
+            original_index_map,
+            group_ids,
+            group_sizes_by_id,
+            recording_override=rec_export,
         )
     if EXPORT_TO_SI_GUI:
         si_gui_folder = export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
 
     print("---- Summary ----")
     print("SC2 pipeline complete.")
+    try:
+        n_units = len(sorting_sc2.get_unit_ids())
+    except Exception:
+        n_units = "unknown"
+    qc_metrics_path = getattr(analyzer_sc2, "_qc_metrics_path", None)
+    if qc_metrics_path is None and getattr(analyzer_sc2, "folder", None):
+        qc_metrics_path = str(Path(analyzer_sc2.folder) / "qc_metrics.csv")
+    print("Summary:", f"units={n_units},", f"qc_metrics={qc_metrics_path or 'n/a'}")
     if phy_folder:
-        print(f"Phy export folder: {phy_folder}")
-        print(f"Phy params file: {phy_folder / 'params.py'}")
+        print(f"Run: phy template-gui \"{phy_folder / 'params.py'}\"")
         params_py = phy_folder / "params.py"
         if EXPORT_PHY_EXTRACT_WAVEFORMS:
             try:
