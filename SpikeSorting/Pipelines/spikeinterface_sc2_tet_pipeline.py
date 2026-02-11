@@ -56,6 +56,7 @@ from Functions.pipeline_utils import (
 # ---------------------------------------------------------------------
 # User configuration
 # ---------------------------------------------------------------------
+# Main flow overview: load -> group/bad-channels -> geometry -> preprocess -> sort -> analyze/QC -> export.
 
 # Quick start
 # - Optional: run the presort notebook for QC/visual checks before sorting.
@@ -936,6 +937,7 @@ def disable_run_logging(handle):
 # ---------------------------------------------------------------------
 # Main pipeline flow
 # ---------------------------------------------------------------------
+# Flow: load -> group/bad-channels -> geometry -> preprocess -> sort -> analyze/QC -> export.
 
 
 def main():
