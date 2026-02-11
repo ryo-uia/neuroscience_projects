@@ -155,7 +155,7 @@ CHANNEL_GROUPS: list[list[int | str]] = [
 CHANNEL_GROUPS_PATH = None  # Optional: JSON file path or env SPIKESORT_CHANNEL_GROUPS (None=ignore)
 STRICT_GROUPS = True  # True=error if no valid groups; False=chunk by order
 # Optional: bundle layout (geometry only). Does NOT change grouping/sorting mode.
-BUNDLE_GROUPING_MODE = "tetrode"  # "tetrode" (default) or "single_grid"
+BUNDLE_GROUPING_MODE = "tetrode"  # geometry layout when bundling: "tetrode" (default) or "single_grid"
 # When "tetrode", the bundle grid settings below are ignored.
 BUNDLE_GRID_COLS = 4  # columns for single-grid bundle layout
 BUNDLE_GRID_DX_UM = 10.0  # bundle grid x-spacing (synthetic; mirrors .prb layout when single_grid)
