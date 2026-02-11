@@ -94,11 +94,10 @@ EXPORT_TO_PHY = True  # True=write Phy export after sorting; False=skip
 EXPORT_TO_SI_GUI = False  # True=write SpikeInterface GUI export; False=skip
 EXPORT_PHY_EXTRACT_WAVEFORMS = False  # True=run `phy extract-waveforms` to precompute waveforms for faster UI; False=skip (Phy computes on open)
 # Requires Phy CLI on PATH; otherwise it warns/skips.
-# None=auto: when exporting a single group, keep as-exported contiguous IDs and skip channel_id rewrites;
-# otherwise rewrite channel_ids for stable mapping.
-SIMPLE_PHY_EXPORT = None
-EXPORT_PHY_CHANNEL_IDS_MODE = "oe_label"  # labels in Phy export metadata: oe_index (numeric), oe_label (CH##, recommended), as_exported (compact)
-# Why this matters: Phy shows contiguous export indices only; channel_ids in params.py is the stable mapping back to Open Ephys channels for downstream analysis and reporting.
+# SIMPLE_PHY_EXPORT controls Phy export mode.
+SIMPLE_PHY_EXPORT = None  # None=auto (simple only when single group); True=force simple (contiguous as_exported IDs, no mapping rewrite); False=force full export (rewrite channel_ids for stable mapping).
+EXPORT_PHY_CHANNEL_IDS_MODE = "oe_label"  # Label channel_ids for analysis: oe_label (CH##, recommended) or oe_index (0..63, gaps if channels dropped); as_exported keeps contiguous export IDs.
+# Why this matters: Phy UI shows only contiguous export indices; use channel_ids in params.py to map back to OE channels.
 MATERIALIZE_EXPORT = False  # True=save rec_export to disk before analyzer/export (faster reuse; uses extra space); False=in-memory
 
 # Analyzer/QC
@@ -170,12 +169,12 @@ AUTO_BAD_CHANNELS_METHOD = "std"  # only used when AUTO_BAD_CHANNELS=True; "std"
 AUTO_BAD_CHANNELS_KWARGS = {}  # only used when AUTO_BAD_CHANNELS=True; extra args passed to detect_bad_channels ({}=defaults)
 
 # Geometry/traceview display
-ATTACH_GEOMETRY = True  # True=attach probe geometry to recording; False=skip
+ATTACH_GEOMETRY = True  # Attach probe geometry for channel locations (plots, local whitening); does not change bandpass/CAR
 # Note: some internal SI/SC2 wrapper objects may still emit "no Probe attached; creating dummy"
 # warnings even when the main recording has probe geometry attached.
-LINEARIZE_TRACEVIEW = True  # True=flatten groups for traceview display; False=keep group layout
-TRACEVIEW_CONTACT_SPACING_UM = 20.0  # spacing between contacts in traceview
-TRACEVIEW_GROUP_SPACING_UM = 200.0  # spacing between groups in traceview
+LINEARIZE_TRACEVIEW = True  # Traceview only (not Phy or preprocessing): True=flatten groups; False=keep group layout
+TRACEVIEW_CONTACT_SPACING_UM = 20.0  # traceview-only spacing between contacts
+TRACEVIEW_GROUP_SPACING_UM = 200.0  # traceview-only spacing between groups
 # Synthetic within-tetrode pitch for the 2x2 layout (geometry only).
 TETRODE_PITCH_UM = 20.0  # within-tetrode spacing (2x2)
 # Synthetic spacing between tetrodes in the bundle layout (only affects geometry/whitening/visualization).
@@ -321,6 +320,65 @@ def attach_geometry_if_needed(
         label_text = f" ({label})" if label else ""
         print(f"Geometry attach{label_text}: bundle_grid={bundle_grid}, groups={len(groups)}.")
     return out
+
+
+def build_oe_index_map(recording, fallback_map: dict) -> dict:
+    """Return channel_id -> numeric OE index when available; fallback to original order."""
+    ch_ids = list(recording.channel_ids)
+    try:
+        prop_keys = recording.get_property_keys()
+    except Exception:
+        prop_keys = []
+
+    # Preferred: explicit OE index property from extractor.
+    for key in ("oe_channel_index", "oe_channel_indices", "channel_index", "channel_indices", "oe_index"):
+        if key in prop_keys:
+            try:
+                vals = recording.get_property(key)
+                if vals is not None and len(vals) == len(ch_ids):
+                    mapping = {ch: int(v) for ch, v in zip(ch_ids, vals)}
+                    for ch in ch_ids:
+                        mapping[str(ch)] = mapping[ch]
+                    return mapping
+            except Exception:
+                pass
+
+    # Fallback: parse numeric suffix from channel labels (e.g., CH1..CH64 or CH0..CH63).
+    labels = None
+    try:
+        if "channel_name" in prop_keys:
+            labels = list(recording.get_property("channel_name"))
+    except Exception:
+        labels = None
+    if not labels:
+        labels = [str(ch) for ch in ch_ids]
+
+    nums = []
+    for label in labels:
+        match = re.search(r"(?:CH)?(\d+)", str(label))
+        if match:
+            nums.append(int(match.group(1)))
+    if nums:
+        offset = 1 if min(nums) == 1 else 0
+        mapping = {}
+        for ch, label in zip(ch_ids, labels):
+            match = re.search(r"(?:CH)?(\d+)", str(label))
+            if match:
+                idx = int(match.group(1)) - offset
+                mapping[ch] = idx
+                mapping[str(ch)] = idx
+        if len(mapping) == len(ch_ids):
+            return mapping
+        if mapping:
+            for ch in ch_ids:
+                if ch not in mapping and str(ch) not in mapping:
+                    fallback = fallback_map.get(ch, fallback_map.get(str(ch), None))
+                    if fallback is not None:
+                        mapping[ch] = int(fallback)
+                        mapping[str(ch)] = int(fallback)
+            return mapping
+
+    return fallback_map
 
 
 def preprocess_for_sc2(recording, groups=None):
@@ -567,6 +625,7 @@ def export_for_phy(
     label: str,
     groups,
     original_index_map: dict,
+    oe_index_map: dict,
     group_ids=None,
     recording_override=None,
 ):
@@ -631,9 +690,13 @@ def export_for_phy(
     except Exception as exc:
         print(f"WARNING: could not read 'group' property: {exc}")
     def lookup_index(ch, fallback):
+        if ch in oe_index_map:
+            return int(oe_index_map[ch])
+        ch_str = str(ch)
+        if ch_str in oe_index_map:
+            return int(oe_index_map[ch_str])
         if ch in original_index_map:
             return int(original_index_map[ch])
-        ch_str = str(ch)
         if ch_str in original_index_map:
             return int(original_index_map[ch_str])
         return int(fallback)
@@ -663,8 +726,7 @@ def export_for_phy(
         channel_ids_text = None
     else:
         # Phy uses channel_map for compact 0..N-1 ordering in the exported binary (shifts after removals),
-        # and channel_ids for labels; here "OE indices" means the index in the original
-        # recording.channel_ids order (after any slicing), not necessarily the hardware channel number.
+        # and channel_ids for labels; here "oe_index" prefers the numeric OE index when available.
         channel_ids_out = np.array(
             [lookup_index(ch, idx) for idx, ch in enumerate(channel_ids_rec)],
             dtype=np.int32,
@@ -1030,6 +1092,7 @@ def main():
     for idx, ch in enumerate(original_channel_order):
         original_index_map[ch] = idx
         original_index_map[str(ch)] = idx
+    oe_index_map = build_oe_index_map(recording, original_index_map)
     channel_order = original_channel_order.copy()
 
     print("---- Channel groups ----")
@@ -1506,6 +1569,7 @@ def main():
                         f"sc2_g{gid}",
                         [grp_channels],
                         original_index_map,
+                        oe_index_map,
                         [gid],
                         recording_override=rec_exp,
                     )
@@ -1552,6 +1616,7 @@ def main():
                 "sc2",
                 groups,
                 original_index_map,
+                oe_index_map,
                 group_ids,
                 recording_override=rec_export,
             )
