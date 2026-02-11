@@ -57,6 +57,11 @@ from Functions.pipeline_utils import (
 # User configuration
 # ---------------------------------------------------------------------
 
+# Quick start
+# - Optional: run the presort notebook for QC/visual checks before sorting.
+# - Set TEST_SECONDS=300 for a fast QC run.
+# - Run this script, pick a session, then open Phy from the printed command.
+# - Once QC looks good, set TEST_SECONDS=None and rerun for full export.
 # Workflow notes
 # - Primary workflow: run this pipeline, then curate units in Phy.
 # - Optional assistant workflow: use SpikeAgent after Phy curation.
@@ -354,10 +359,13 @@ def build_oe_index_map(recording, fallback_map: dict) -> dict:
         labels = [str(ch) for ch in ch_ids]
 
     nums = []
+    parsed = []
     for label in labels:
         match = re.search(r"(?:CH)?(\d+)", str(label))
         if match:
-            nums.append(int(match.group(1)))
+            num = int(match.group(1))
+            nums.append(num)
+            parsed.append((str(label), num))
     if nums:
         offset = 1 if min(nums) == 1 else 0
         mapping = {}
@@ -627,7 +635,6 @@ def export_for_phy(
     original_index_map: dict,
     oe_index_map: dict,
     group_ids=None,
-    recording_override=None,
 ):
     """Export analyzer to Phy and rewrite channel_ids mapping when configured."""
     folder = base_folder / f"phy_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -636,36 +643,11 @@ def export_for_phy(
     export_kwargs = dict(output_folder=folder, remove_if_exists=True, verbose=False, copy_binary=True)
     export_recording = analyzer.recording
     export_source = "analyzer.recording"
-    if recording_override is not None:
-        try:
-            export_to_phy(analyzer, recording=recording_override, **export_kwargs)
-            export_recording = recording_override
-            export_source = "recording_override"
-        except TypeError as exc:
-            # Back-compat for older SI versions: export_to_phy(recording, sorting, ...)
-            try:
-                export_to_phy(recording_override, analyzer.sorting, **export_kwargs)
-                export_recording = recording_override
-                export_source = "recording_override (legacy)"
-            except Exception:
-                print(f"WARNING: export with recording_override failed; falling back to analyzer ({exc})")
-                export_to_phy(analyzer, **export_kwargs)
-                export_source = "analyzer.recording (fallback)"
-        except Exception as exc:
-            print(f"WARNING: export with recording_override failed; falling back to analyzer ({exc})")
-            export_to_phy(analyzer, **export_kwargs)
-            export_source = "analyzer.recording (fallback)"
-    else:
-        export_to_phy(analyzer, **export_kwargs)
+    export_to_phy(analyzer, **export_kwargs)
     print(
         f"Phy export source: {export_source} | scaled_to_uV={EXPORT_SCALE_TO_UV} | "
         f"bandpass_for_phy={EXPORT_BANDPASS_FOR_PHY}"
     )
-    if EXPORT_BANDPASS_FOR_PHY and export_source != "recording_override":
-        print(
-            "WARNING: EXPORT_BANDPASS_FOR_PHY=True but Phy export used analyzer.recording; "
-            "bandpass export may be bypassed."
-        )
     if SIMPLE_PHY_EXPORT is None:
         simple_flag = groups is not None and len(groups) <= 1
     else:
@@ -733,6 +715,19 @@ def export_for_phy(
         )
         channel_ids_text = f"channel_ids = np.array({channel_ids_out.tolist()}, dtype=np.int32)"
     channel_map = np.arange(len(channel_ids_rec), dtype=np.int32)
+
+    # Always emit a mapping file alongside the Phy export.
+    try:
+        mapping_path = folder / "channel_id_map.tsv"
+        with mapping_path.open("w", encoding="utf-8") as f:
+            f.write("phy_idx\toe_index\toe_label\n")
+            for phy_idx, ch in enumerate(channel_ids_rec):
+                oe_index = lookup_index(ch, phy_idx)
+                ch_label = str(ch)
+                f.write(f"{phy_idx}\t{oe_index}\t{ch_label}\n")
+        print(f"Phy mapping: {mapping_path}")
+    except Exception as exc:
+        print(f"WARNING: failed to write channel_id_map.tsv: {exc}")
 
     # Build channel->group and slot lookup from the provided groups
     ch_to_group = {}
@@ -1571,7 +1566,6 @@ def main():
                         original_index_map,
                         oe_index_map,
                         [gid],
-                        recording_override=rec_exp,
                     )
                     phy_folders.append(phy_folder)
                 if EXPORT_TO_SI_GUI:
@@ -1618,7 +1612,6 @@ def main():
                 original_index_map,
                 oe_index_map,
                 group_ids,
-                recording_override=rec_export,
             )
             phy_folders.append(phy_folder)
         if EXPORT_TO_SI_GUI:

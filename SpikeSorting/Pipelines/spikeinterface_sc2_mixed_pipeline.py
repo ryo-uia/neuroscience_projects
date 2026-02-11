@@ -58,6 +58,11 @@ from Functions.pipeline_utils import (
 # User configuration
 # ---------------------------------------------------------------------
 
+# Quick start (beginner)
+# - Optional: run the presort notebook for QC/visual checks before sorting.
+# - Set TEST_SECONDS=300 for a fast QC run.
+# - Run this script, pick a session, then open Phy from the printed command.
+# - Once QC looks good, set TEST_SECONDS=None and rerun for full export.
 # Workflow notes
 # - Primary workflow: run this pipeline, then curate units in Phy.
 # - Optional assistant workflow: use SpikeAgent after Phy curation.
@@ -625,7 +630,6 @@ def export_for_phy(
     oe_index_map: dict,
     group_ids=None,
     group_sizes_by_id=None,
-    recording_override=None,
 ):
     """Export Phy folder and (when requested) rewrite channel_ids in params.py."""
     folder = base_folder / f"phy_{label}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -639,40 +643,16 @@ def export_for_phy(
     )
     export_recording = analyzer.recording
     export_source = "analyzer.recording"
-    if recording_override is not None:
-        try:
-            export_to_phy(analyzer, recording=recording_override, **export_kwargs)
-            export_recording = recording_override
-            export_source = "recording_override"
-        except TypeError as exc:
-            # Back-compat for older SI versions: export_to_phy(recording, sorting, ...)
-            try:
-                export_to_phy(recording_override, analyzer.sorting, **export_kwargs)
-                export_recording = recording_override
-                export_source = "recording_override (legacy)"
-            except Exception:
-                print(f"WARNING: export with recording_override failed; falling back to analyzer ({exc})")
-                export_to_phy(analyzer, **export_kwargs)
-                export_source = "analyzer.recording (fallback)"
-        except Exception as exc:
-            print(f"WARNING: export with recording_override failed; falling back to analyzer ({exc})")
-            export_to_phy(analyzer, **export_kwargs)
-            export_source = "analyzer.recording (fallback)"
-    else:
-        export_to_phy(analyzer, **export_kwargs)
+    export_to_phy(analyzer, **export_kwargs)
     print(
         f"Phy export source: {export_source} | scaled_to_uV={EXPORT_SCALE_TO_UV} | "
         f"bandpass_for_phy={EXPORT_BANDPASS_FOR_PHY}"
     )
-    if EXPORT_BANDPASS_FOR_PHY and export_source != "recording_override":
-        print(
-            "WARNING: EXPORT_BANDPASS_FOR_PHY=True but Phy export used analyzer.recording; "
-            "bandpass export may be bypassed."
-        )
     if SIMPLE_PHY_EXPORT is None:
         simple_flag = groups is not None and len(groups) <= 1
     else:
         simple_flag = SIMPLE_PHY_EXPORT
+    # Simple Phy export = keep Phy default contiguous channel_ids for a single-group run (no mapping rewrite).
     simple_export = bool(simple_flag) and groups is not None and len(groups) <= 1
     if simple_export and EXPORT_PHY_CHANNEL_IDS_MODE == "as_exported":
         return folder, None
@@ -736,6 +716,19 @@ def export_for_phy(
         )
         channel_ids_text = f"channel_ids = np.array({channel_ids_out.tolist()}, dtype=np.int32)"
     channel_map = np.arange(len(channel_ids_rec), dtype=np.int32)
+
+    # Always emit a mapping file alongside the Phy export.
+    try:
+        mapping_path = folder / "channel_id_map.tsv"
+        with mapping_path.open("w", encoding="utf-8") as f:
+            f.write("phy_idx\toe_index\toe_label\n")
+            for phy_idx, ch in enumerate(channel_ids_rec):
+                oe_index = lookup_index(ch, phy_idx)
+                ch_label = str(ch)
+                f.write(f"{phy_idx}\t{oe_index}\t{ch_label}\n")
+        print(f"Phy mapping: {mapping_path}")
+    except Exception as exc:
+        print(f"WARNING: failed to write channel_id_map.tsv: {exc}")
 
     group_lookup = {}
     slot_lookup = {}
@@ -1587,7 +1580,6 @@ def main():
             oe_index_map,
             group_ids,
             group_sizes_by_id,
-            recording_override=rec_export,
         )
     if EXPORT_TO_SI_GUI:
         si_gui_folder = export_for_si_gui(analyzer_sc2, SI_GUI_OUT, "sc2")
