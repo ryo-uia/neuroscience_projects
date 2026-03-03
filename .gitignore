@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Local environments
+.venv/
+venv/
+env/
+ENV/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+# SpikeSorting runtime outputs
+SpikeSorting/sc2_outputs/
+SpikeSorting/si_gui_exports/
+
+# Local recordings (large/raw data should stay out of git)
+SpikeSorting/recordings/
+

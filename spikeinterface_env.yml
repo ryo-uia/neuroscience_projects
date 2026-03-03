@@ -1,0 +1,27 @@
+﻿name: spikeinterface
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=2.3.*
+  - scipy=1.16.*
+  - scikit-learn=1.7.*
+  - hdbscan=0.8.39
+  - pandas=2.3.*
+  - matplotlib=3.10.*
+  - numba=0.62.*
+  - seaborn=0.13.*
+  - jupyterlab=4.4.*
+  - ipykernel=7.0.*
+  - pip:
+      - spikeinterface==0.103.2
+      - spikeinterface-gui==0.11.0
+      - probeinterface==0.3.1
+      - open-ephys-python-tools==1.0.1
+      - neo==0.14.3
+
+# Notes:
+# - This file is intentionally portable (no machine-specific `prefix`).
+# - SpykingCircus2 is provided by SpikeInterface (internal sorter in 0.103.2).
+# - Phy GUI is typically installed in a separate env (e.g., `newphy2`).

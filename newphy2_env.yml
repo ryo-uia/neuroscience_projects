@@ -1,0 +1,21 @@
+name: newphy2
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy=1.26.4
+  - scipy=1.16.2
+  - scikit-learn=1.7.2
+  - matplotlib=3.10.6
+  - h5py=3.14.0
+  - click=8.2.1
+  - pyqt=5.15.*
+  - qtpy=2.4.3
+  - pip:
+      - phy==2.0b6
+      - phylib==2.6.2
+
+# Notes:
+# - Use this env for Phy curation / `phy template-gui`, not for sorting.
+# - Sorting pipeline should run in `spikeinterface` env from `spikeinterface_env.yml`.
