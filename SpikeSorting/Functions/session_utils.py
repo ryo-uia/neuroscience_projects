@@ -13,17 +13,7 @@ from typing import List
 import numpy as np
 
 from .run_utils import log_info, log_warn
-from .si_utils import discover_oe_stream_names
-
-
-def _normalize_stream_name(name: str | None) -> str:
-    """Normalize stream name for tolerant matching across OE/SI representations."""
-    if name is None:
-        return ""
-    text = str(name).strip()
-    if "#" in text:
-        text = text.split("#", 1)[-1].strip()
-    return text.casefold()
+from .si_utils import discover_oe_stream_names, normalize_stream_name
 
 
 def pick_stream(data_path: Path, preferred: str | None) -> str:
@@ -36,8 +26,8 @@ def pick_stream(data_path: Path, preferred: str | None) -> str:
     if preferred:
         if preferred in names:
             return preferred
-        preferred_norm = _normalize_stream_name(preferred)
-        normalized_matches = [n for n in names if _normalize_stream_name(n) == preferred_norm]
+        preferred_norm = normalize_stream_name(preferred)
+        normalized_matches = [n for n in names if normalize_stream_name(n) == preferred_norm]
         if len(normalized_matches) == 1:
             resolved = normalized_matches[0]
             log_warn(

@@ -10,8 +10,6 @@ import atexit
 import builtins
 import json
 import os
-import re
-import shutil
 import subprocess
 import sys
 import traceback

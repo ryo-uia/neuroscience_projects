@@ -76,7 +76,7 @@ def discover_oe_stream_names(folder):
         raise
 
 
-def _normalize_stream_name(name: str | None) -> str:
+def normalize_stream_name(name: str | None) -> str:
     """Normalize stream-name variants across Open Ephys/SI representations."""
     if name is None:
         return ""
@@ -99,14 +99,14 @@ def _select_oebin_stream_entry(continuous: list, stream_name: str):
       of picking an arbitrary first match.
     """
     target = str(stream_name)
-    target_norm = _normalize_stream_name(stream_name)
+    target_norm = normalize_stream_name(stream_name)
     best_entries = []
     best_score = -1
     for entry in continuous:
         candidate = str(entry.get("stream_name"))
         if candidate == target:
             score = 3
-        elif target_norm and _normalize_stream_name(candidate) == target_norm:
+        elif target_norm and normalize_stream_name(candidate) == target_norm:
             score = 2
         elif target.endswith(candidate) or candidate.endswith(target):
             score = 1
@@ -621,6 +621,7 @@ def attach_oe_gain_to_uv_from_oebin(recording, data_path: Path, stream_name: str
 
 __all__ = [
     "discover_oe_stream_names",
+    "normalize_stream_name",
     "attach_geom",
     "attach_geometry_if_needed",
     "attach_single_grid_geom",

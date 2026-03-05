@@ -9,12 +9,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from spikeinterface.core import BaseSortingAnalyzer
 
 from .fs_utils import safe_rmtree
 from .run_utils import log_info, log_warn

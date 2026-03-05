@@ -8,12 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-import numpy as np
-
-if TYPE_CHECKING:
-    from spikeinterface.core import BaseRecording, BaseSorting
 
 from .run_utils import log_info, log_warn
 from .si_utils import ensure_probe_attached
