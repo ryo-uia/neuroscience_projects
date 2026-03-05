@@ -52,6 +52,7 @@ If a run behaves oddly, this is usually where the root cause lives.
   - `attach_oe_index_from_oebin()` stores stream-list position from `structure.oebin`.
   - Do not treat that as guaranteed hardware channel number unless your metadata schema explicitly does.
   - If `oe_channel_index` is not attached, fallback channel-order mapping is expected and non-fatal for tet runs.
+  - If multiple streams tie during `structure.oebin` matching, helpers now skip metadata attach (fail-safe) instead of picking an arbitrary first match.
 - Geometry defaults:
   - Channels not covered by groups can end up at `(0, 0)`; strict-group workflows should prevent this.
 - Probe attachment:
@@ -77,6 +78,9 @@ If a run behaves oddly, this is usually where the root cause lives.
   - In tet pipeline, verify `ANALYZER_FROM_SORTER`, `USE_SI_PREPROCESS`, and `USE_SC2_PREPROCESS` match the intended preprocessing/export path.
   - Keep `ANALYZER_FROM_SORTER=True` for single-path behavior (analyzer + Phy share `rec_sc2` context).
   - `scaled_to_uv` controls export scaling intent and `hp_filtered` is written from resolved filter state.
+- Empty JSON config semantics
+  - `load_channel_groups_from_path()` returns explicit empty list for `[]` (no groups), not fallback.
+  - `load_bad_channels_from_path()` returns explicit empty list for `[]` (no bad channels), not fallback.
 
 ## Quick API Reference
 

@@ -179,9 +179,11 @@ def load_channel_groups_from_path(path: Path | str | None) -> List[List] | None:
     try:
         data = json.loads(p.read_text())
         if isinstance(data, (list, tuple)):
-            if not data:
-                log_warn(f"channel groups file is empty: {p}")
+            if any(not isinstance(g, (list, tuple)) for g in data):
+                log_warn(f"expected list of lists in {p}")
                 return None
+            if not data:
+                log_info(f"channel groups file is empty: {p} (interpreting as explicit no groups).")
             return [list(g) for g in data]
         log_warn(f"expected list of lists in {p}")
     except Exception as exc:
@@ -201,8 +203,7 @@ def load_bad_channels_from_path(path: Path | str | None) -> list | None:
         data = json.loads(p.read_text())
         if isinstance(data, (list, tuple)):
             if len(data) == 0:
-                log_warn(f"bad-channels file is empty: {p} (using inline BAD_CHANNELS)")
-                return None
+                log_info(f"bad-channels file is empty: {p} (interpreting as explicit no bad channels).")
             return list(data)
         log_warn(f"expected list of channel IDs in {p}")
     except Exception as exc:

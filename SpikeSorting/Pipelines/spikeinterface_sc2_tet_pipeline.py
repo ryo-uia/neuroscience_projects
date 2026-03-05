@@ -95,8 +95,9 @@ def _pipeline_print(*args, **kwargs):
         file is sys.stderr
         or msg_l.startswith("warning:")
         or msg_l.startswith("error:")
-        or "warning" in msg_l
-        or "error" in msg_l
+        or msg_l.startswith("traceback")
+        or msg_l.startswith("userwarning")
+        or ": userwarning:" in msg_l
         or "traceback" in msg_l
     )
     if warning_like:
@@ -922,17 +923,17 @@ def resolve_groups_and_bad_channels(
 
     # Priority: CLI > env > config > inline.
     config_loaded = load_channel_groups_from_path(channel_groups_path) if channel_groups_path else None
-    if config_loaded:
+    if config_loaded is not None:
         manual_groups = config_loaded
         groups_source = f"config CHANNEL_GROUPS_PATH {channel_groups_path}"
 
     env_loaded = load_channel_groups_from_path(env_groups_path) if env_groups_path else None
-    if env_loaded:
+    if env_loaded is not None:
         manual_groups = env_loaded
         groups_source = f"env file {env_groups_path}"
 
     cli_loaded = load_channel_groups_from_path(args.channel_groups) if args.channel_groups else None
-    if cli_loaded:
+    if cli_loaded is not None:
         manual_groups = cli_loaded
         groups_source = f"CLI file {args.channel_groups}"
 
@@ -1555,11 +1556,13 @@ def run_sorting_stage(
             print(f"SC2 units: {sorting_sc2.get_num_units()} | output: {sorter_folder}")
     except Exception as exc:
         print(f"Error: SpykingCircus2 sorter failed: {exc}")
-        print(f"Attempting to remove partial SC2 output folder: {sc2_run}")
+        print(f"Preserving run folder for debugging: {sc2_run}")
+        print(f"Attempting to remove partial sorter output folder: {sorter_folder}")
         try:
-            safe_rmtree(sc2_run)
+            safe_rmtree(sorter_folder)
+            print("Partial sorter output folder removed.")
         except Exception as exc2:
-            print(f"WARNING: failed to remove partial output folder: {exc2}")
+            print(f"WARNING: failed to remove partial sorter output folder: {exc2}")
         raise
     return sorting_sc2, phy_folders, si_gui_folders
 

@@ -16,15 +16,43 @@ from .run_utils import log_info, log_warn
 from .si_utils import discover_oe_stream_names
 
 
+def _normalize_stream_name(name: str | None) -> str:
+    """Normalize stream name for tolerant matching across OE/SI representations."""
+    if name is None:
+        return ""
+    text = str(name).strip()
+    if "#" in text:
+        text = text.split("#", 1)[-1].strip()
+    return text.casefold()
+
+
 def pick_stream(data_path: Path, preferred: str | None) -> str:
     """Select a neural stream name, honoring explicit override when provided.
 
     Example:
         stream = pick_stream(data_path, "Record Node 125#Acquisition_Board-100.Rhythm Data")
     """
-    if preferred:
-        return preferred
     names = discover_oe_stream_names(data_path)
+    if preferred:
+        if preferred in names:
+            return preferred
+        preferred_norm = _normalize_stream_name(preferred)
+        normalized_matches = [n for n in names if _normalize_stream_name(n) == preferred_norm]
+        if len(normalized_matches) == 1:
+            resolved = normalized_matches[0]
+            log_warn(
+                f"STREAM_NAME '{preferred}' did not match exactly; using '{resolved}' via normalized match."
+            )
+            return resolved
+        if len(normalized_matches) > 1:
+            raise RuntimeError(
+                "STREAM_NAME is ambiguous after normalization. "
+                f"Requested: {preferred!r}. Matches: {normalized_matches}"
+            )
+        raise RuntimeError(
+            f"STREAM_NAME '{preferred}' not found. "
+            f"Available streams: {names}"
+        )
     neural = [n for n in names if "ADC" not in n and "SYNC" not in n]
     if not neural:
         raise RuntimeError("No neural streams found; set STREAM_NAME manually.")

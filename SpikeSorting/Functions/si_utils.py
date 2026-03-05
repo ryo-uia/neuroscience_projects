@@ -83,8 +83,6 @@ def _normalize_stream_name(name: str | None) -> str:
     text = str(name).strip()
     if "#" in text:
         text = text.split("#", 1)[-1].strip()
-    if "." in text:
-        text = text.split(".")[-1].strip()
     return text.casefold()
 
 
@@ -95,12 +93,15 @@ def _select_oebin_stream_entry(continuous: list, stream_name: str):
     1) exact string match
     2) normalized-name match (handles node/prefix wrappers)
     3) suffix containment
+
+    Safety policy:
+    - If multiple entries tie for best score, return None (ambiguous) instead
+      of picking an arbitrary first match.
     """
     target = str(stream_name)
     target_norm = _normalize_stream_name(stream_name)
-    best_entry = None
+    best_entries = []
     best_score = -1
-    ties = 0
     for entry in continuous:
         candidate = str(entry.get("stream_name"))
         if candidate == target:
@@ -112,19 +113,21 @@ def _select_oebin_stream_entry(continuous: list, stream_name: str):
         else:
             score = 0
         if score > best_score:
-            best_entry = entry
+            best_entries = [entry]
             best_score = score
-            ties = 1
         elif score == best_score and score > 0:
-            ties += 1
+            best_entries.append(entry)
     if best_score <= 0:
         return None
-    if ties > 1:
+    if len(best_entries) > 1:
+        candidates = [str(e.get("stream_name")) for e in best_entries]
         log_warn(
             "multiple structure.oebin streams matched requested stream name; "
-            "using first best match."
+            "skipping metadata attach to avoid ambiguity. "
+            f"requested={stream_name!r}, matched={candidates}"
         )
-    return best_entry
+        return None
+    return best_entries[0]
 
 
 def attach_geom(recording, groups, tetrodes_per_row=None, pitch=20.0, dx=150.0, dy=150.0, tetrode_offsets=None):

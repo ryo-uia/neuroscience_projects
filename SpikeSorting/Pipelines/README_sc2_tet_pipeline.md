@@ -114,6 +114,7 @@ Notes:
 - By default, the script prompts for session selection when `SESSION_SUBPATH` is not set.
 - For quick tests, set `TEST_SECONDS=300` in the script; set back to `None` for full runs.
 - In this workspace, VS Code is pinned to the `spikeinterface` interpreter, so plain `python ...` is the default path.
+- Advanced orchestration (SpikeAgent and job-wrapper) is documented in `SpikeSorting/Pipelines/README_sc2_tet_advanced.md`.
 
 ## Config Reference (Common Options)
 
@@ -144,6 +145,8 @@ Additional runtime safeguards:
 - If both `USE_SI_PREPROCESS=False` and `USE_SC2_PREPROCESS=False`, the run proceeds in raw/no-internal mode (optional no-SI CAR/notch settings may still apply).
 - If `USE_SI_PREPROCESS=False` and `SI_APPLY_CAR=True`, SI CAR still runs in the no-SI path (intentional CAR-only behavior; logged with warning).
 - Phy `hp_filtered` describes the exported analyzer recording path, not SC2 internal preprocessing used during sorting.
+- Empty JSON semantics are explicit: `[]` in `--channel-groups` means no groups (not fallback), and `[]` in `--bad-channels` means no bad channels (not fallback).
+- If `structure.oebin` stream matching is ambiguous, OE metadata attach (`oe_channel_index` / `oe_gain_to_uV`) is skipped to avoid incorrect mapping.
 
 ## Recommended Baseline (Tetrode)
 
@@ -213,3 +216,10 @@ The script prints launch commands at the end:
 - Unexpected CAR in a no-SI-preprocess run
   - Cause: `USE_SI_PREPROCESS=False` with `SI_APPLY_CAR=True` still applies SI CAR in the no-SI path.
   - Fix: set `SI_APPLY_CAR=False` (or enable `RAW_MODE=True` for strict raw behavior).
+- Ambiguous Open Ephys stream during metadata attach
+  - Cause: multiple `structure.oebin` streams tie for requested stream name after normalization.
+  - Behavior: pipeline skips attaching OE metadata properties rather than guessing.
+  - Fix: set an exact `STREAM_NAME` matching the stream shown in extractor output.
+- Sorter failure cleanup behavior
+  - Behavior: pipeline preserves the run folder for debugging and removes only partial `sorter_output`.
+  - Rationale: keeps `effective_config.json` and run diagnostics available after failures.
