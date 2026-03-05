@@ -521,6 +521,26 @@ def attach_oe_gain_to_uv_from_oebin(recording, data_path: Path, stream_name: str
     if not oebin_path.exists():
         return
 
+    def _bit_volts_to_gain_uv(value):
+        """Convert `bit_volts` to uV/bit with heuristic unit handling.
+
+        Open Ephys metadata can appear in either:
+        - uV/bit (commonly around 0.195), or
+        - V/bit (commonly around 1.95e-7)
+        """
+        try:
+            raw = float(value)
+        except Exception:
+            return None, None
+        if not np.isfinite(raw) or raw == 0.0:
+            return None, None
+        abs_raw = abs(raw)
+        # Likely V/bit -> convert to uV/bit.
+        if 1e-9 <= abs_raw <= 1e-4:
+            return raw * 1e6, "v_per_bit"
+        # Likely already uV/bit.
+        return raw, "uv_per_bit"
+
     try:
         meta = json.loads(oebin_path.read_text())
         continuous = meta.get("continuous", [])
@@ -533,6 +553,9 @@ def attach_oe_gain_to_uv_from_oebin(recording, data_path: Path, stream_name: str
             return
 
         name_to_gain_uv = {}
+        metadata_gain_count = 0
+        converted_count = 0
+        direct_count = 0
         for ch_meta in channels_meta:
             name = ch_meta.get("channel_name")
             bit_volts = ch_meta.get("bit_volts")
@@ -540,12 +563,16 @@ def attach_oe_gain_to_uv_from_oebin(recording, data_path: Path, stream_name: str
                 continue
             if bit_volts is None:
                 continue
-            try:
-                gain_uv = float(bit_volts) * 1e6
-            except Exception:
+            gain_uv, mode = _bit_volts_to_gain_uv(bit_volts)
+            if gain_uv is None:
                 continue
             if np.isfinite(gain_uv) and gain_uv != 0.0:
                 name_to_gain_uv[name] = gain_uv
+                metadata_gain_count += 1
+                if mode == "v_per_bit":
+                    converted_count += 1
+                elif mode == "uv_per_bit":
+                    direct_count += 1
         if not name_to_gain_uv:
             return
 
@@ -569,6 +596,21 @@ def attach_oe_gain_to_uv_from_oebin(recording, data_path: Path, stream_name: str
 
         gains_arr = np.asarray(gain_values, dtype=np.float32)
         recording.set_property("oe_gain_to_uV", gains_arr)
+        if converted_count and direct_count:
+            log_warn(
+                "OE gain map: mixed bit_volts units detected in structure.oebin "
+                f"(converted={converted_count}, direct={direct_count})."
+            )
+        elif converted_count:
+            log_info(
+                "OE gain map: converted bit_volts from V/bit to uV/bit "
+                f"(metadata channels={metadata_gain_count}, recording channels={len(gains_arr)})."
+            )
+        elif direct_count:
+            log_info(
+                "OE gain map: interpreted bit_volts as uV/bit "
+                f"(metadata channels={metadata_gain_count}, recording channels={len(gains_arr)})."
+            )
         log_info(
             "OE gain map: attached oe_gain_to_uV from structure.oebin "
             f"(median={float(np.median(np.abs(gains_arr))):.3e} uV/bit)."

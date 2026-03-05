@@ -937,6 +937,11 @@ def resolve_groups_and_bad_channels(
         manual_groups = cli_loaded
         groups_source = f"CLI file {args.channel_groups}"
 
+    if manual_groups:
+        log_info(f"Channel Groups Source: {groups_source} | configured groups={len(manual_groups)}")
+    else:
+        log_info("Channel Groups Source: none configured (will use fallback chunking if needed).")
+
     base_groups = []
     if manual_groups:
         base_groups = resolve_manual_groups(recording, manual_groups)
