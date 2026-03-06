@@ -141,6 +141,7 @@ Additional runtime safeguards:
 - Per-group mode requires valid channel locations (normally keep `ATTACH_GEOMETRY=True`).
 - Group lookups are strict in per-group mode (missing group key raises immediately; no fallback to full recording).
 - SC2 `job_kwargs.n_jobs` defaults to `1` for stable multiprocessing behavior.
+- SC2 can show small run-to-run variation in intermediate clustering counts (for example `Kept X clean clusters`) due to stochastic components; this is expected unless deterministic settings are forced.
 - If both `USE_SI_PREPROCESS=True` and `USE_SC2_PREPROCESS=True`, filter/reference stages are applied twice (intentional test mode; logged with warnings).
 - If both `USE_SI_PREPROCESS=False` and `USE_SC2_PREPROCESS=False`, the run proceeds in raw/no-internal mode (optional no-SI CAR/notch settings may still apply).
 - If `USE_SI_PREPROCESS=False` and `SI_APPLY_CAR=True`, SI CAR still runs in the no-SI path (intentional CAR-only behavior; logged with warning).
