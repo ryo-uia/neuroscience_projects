@@ -1,4 +1,4 @@
-"""Pipeline-level dry-run regression test for tet pipeline orchestration."""
+"""Pipeline-level dry-run regression test for mixed pipeline orchestration."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from Pipelines import spikeinterface_sc2_tet_pipeline as tet
+from Pipelines import spikeinterface_sc2_mixed_pipeline as mixed
 from Functions.testing_utils import workspace_tempdir
 
 
@@ -39,15 +39,10 @@ class _FakeRecording:
         return _FakeRecording(list(keep))
 
 
-class TetPipelineDryRunTests(unittest.TestCase):
-    def test_dry_run_respects_cli_group_precedence_and_skips_sorting(self):
-        with workspace_tempdir("tet_pipeline_dry_run") as tmp_path:
-            groups_cfg = tmp_path / "groups_config.json"
-            groups_env = tmp_path / "groups_env.json"
+class MixedPipelineDryRunTests(unittest.TestCase):
+    def test_dry_run_writes_effective_config_and_skips_sorting(self):
+        with workspace_tempdir("mixed_pipeline_dry_run") as tmp_path:
             groups_cli = tmp_path / "groups_cli.json"
-
-            groups_cfg.write_text(json.dumps([["CH1", "CH2"]]), encoding="utf-8")
-            groups_env.write_text(json.dumps([["CH1", "CH2", "CH3"]]), encoding="utf-8")
             groups_cli.write_text(json.dumps([["CH1", "CH2", "CH3", "CH4"]]), encoding="utf-8")
 
             channels = ["CH1", "CH2", "CH3", "CH4"]
@@ -59,7 +54,7 @@ class TetPipelineDryRunTests(unittest.TestCase):
             oe_index_map = dict(original_index_map)
 
             captured = {}
-            original_resolve = tet.resolve_groups_and_bad_channels
+            original_resolve = mixed.resolve_groups_and_bad_channels
 
             def _wrapped_resolve(*args, **kwargs):
                 out = original_resolve(*args, **kwargs)
@@ -68,7 +63,7 @@ class TetPipelineDryRunTests(unittest.TestCase):
                 return out
 
             with patch.object(
-                tet,
+                mixed,
                 "load_recording_with_indices",
                 return_value=(
                     rec,
@@ -80,42 +75,35 @@ class TetPipelineDryRunTests(unittest.TestCase):
                     "Record Node 125#Acquisition_Board-100.Rhythm Data",
                 ),
             ), patch.object(
-                tet,
+                mixed,
                 "reserve_run_folder",
                 return_value=tmp_path / "sc2_run_test",
             ), patch.object(
-                tet,
-                "initialize_run_io_shared",
+                mixed,
+                "initialize_run_io",
                 return_value=(
-                    tmp_path / "sc2_outputs",
-                    tmp_path / "si_gui_exports",
                     None,
                     tmp_path / "run.log",
                 ),
             ), patch.object(
-                tet,
+                mixed,
                 "resolve_groups_and_bad_channels",
                 side_effect=_wrapped_resolve,
             ), patch.object(
-                tet,
+                mixed,
                 "run_sorting_stage",
                 side_effect=AssertionError("run_sorting_stage must not be called in --dry-run-config"),
             ) as run_sorter_mock, patch.object(
-                tet,
+                mixed,
                 "BAD_CHANNELS",
                 [],
             ), patch.object(
-                tet,
-                "CHANNEL_GROUPS_PATH",
-                groups_cfg,
-            ), patch.object(
-                tet.atexit,
+                mixed.atexit,
                 "register",
                 lambda *a, **k: None,
             ), patch.dict(
                 os.environ,
                 {
-                    "SPIKESORT_CHANNEL_GROUPS": str(groups_env),
                     "SPIKESORT_PIPELINE_OVERRIDES": "",
                 },
                 clear=False,
@@ -123,7 +111,7 @@ class TetPipelineDryRunTests(unittest.TestCase):
                 sys,
                 "argv",
                 [
-                    "spikeinterface_sc2_tet_pipeline.py",
+                    "spikeinterface_sc2_mixed_pipeline.py",
                     "--dry-run-config",
                     "--root-dir",
                     str(tmp_path),
@@ -133,12 +121,9 @@ class TetPipelineDryRunTests(unittest.TestCase):
                     str(groups_cli),
                 ],
             ):
-                tet.main()
+                mixed.main()
 
             self.assertTrue(captured.get("should_exit_early"))
-            groups_source = captured["grouping_details"]["groups_source"]
-            self.assertIn("CLI file", groups_source)
-            self.assertIn("groups_cli.json", groups_source)
             effective_config = tmp_path / "sc2_run_test" / "effective_config.json"
             self.assertTrue(effective_config.exists())
             payload = json.loads(effective_config.read_text(encoding="utf-8"))

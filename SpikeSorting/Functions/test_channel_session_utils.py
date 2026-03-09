@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -18,19 +17,20 @@ from Functions.channel_utils import (
     load_channel_groups_from_path,
 )
 from Functions.session_utils import pick_stream
+from Functions.testing_utils import workspace_tempdir
 
 
 class TestChannelUtilsJsonSemantics(unittest.TestCase):
     def test_empty_channel_groups_json_is_explicit_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            p = Path(tmp) / "groups.json"
+        with workspace_tempdir("channel_groups_json") as tmp:
+            p = tmp / "groups.json"
             p.write_text(json.dumps([]), encoding="utf-8")
             groups = load_channel_groups_from_path(p)
             self.assertEqual(groups, [])
 
     def test_empty_bad_channels_json_is_explicit_empty(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            p = Path(tmp) / "bad.json"
+        with workspace_tempdir("bad_channels_json") as tmp:
+            p = tmp / "bad.json"
             p.write_text(json.dumps([]), encoding="utf-8")
             bad = load_bad_channels_from_path(p)
             self.assertEqual(bad, [])

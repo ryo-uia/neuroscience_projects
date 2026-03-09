@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -14,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from Functions.phy_export import _write_channel_id_map
 from Functions.si_utils import _select_oebin_stream_entry, attach_oe_gain_to_uv_from_oebin
+from Functions.testing_utils import workspace_tempdir
 
 
 class SiUtilsStreamMatchingTests(unittest.TestCase):
@@ -56,8 +56,7 @@ class SiUtilsStreamMatchingTests(unittest.TestCase):
 
 class PhyExportMappingFileTests(unittest.TestCase):
     def test_write_channel_id_map(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            folder = Path(tmp)
+        with workspace_tempdir("phy_channel_id_map") as folder:
             channel_ids = ["CH40", "CH38", "CH36"]
             index_map = {"CH40": 0, "CH38": 1, "CH36": 2}
 
@@ -107,8 +106,7 @@ class OEBinGainAttachTests(unittest.TestCase):
         (root / "structure.oebin").write_text(json.dumps(payload), encoding="utf-8")
 
     def test_bit_volts_already_uv_per_bit(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with workspace_tempdir("oebin_gain_uv") as root:
             self._write_oebin(root, [0.195, 0.195, 0.195])
             rec = _FakeRecordingForOEBin(["CH1", "CH2", "CH3"])
 
@@ -124,8 +122,7 @@ class OEBinGainAttachTests(unittest.TestCase):
             self.assertAlmostEqual(float(gains[2]), 0.195, places=6)
 
     def test_bit_volts_in_v_per_bit_is_converted(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+        with workspace_tempdir("oebin_gain_v") as root:
             self._write_oebin(root, [1.95e-7, 1.95e-7, 1.95e-7])
             rec = _FakeRecordingForOEBin(["CH1", "CH2", "CH3"])
 

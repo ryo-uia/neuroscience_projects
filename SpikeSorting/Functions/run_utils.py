@@ -47,16 +47,21 @@ class TeeStream:
 
 
 def reserve_run_folder(base_out: Path) -> Path:
-    """Reserve a unique run folder path under `sc2_outputs`."""
+    """Atomically create and return a unique run folder under `sc2_outputs`."""
     out_root = base_out / "sc2_outputs"
     out_root.mkdir(parents=True, exist_ok=True)
     run_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_folder = out_root / f"sc2_run_{run_tag}"
     suffix = 1
-    while run_folder.exists():
-        run_folder = out_root / f"sc2_run_{run_tag}_{suffix:02d}"
-        suffix += 1
-    return run_folder
+    while True:
+        if suffix == 1:
+            run_folder = out_root / f"sc2_run_{run_tag}"
+        else:
+            run_folder = out_root / f"sc2_run_{run_tag}_{suffix - 1:02d}"
+        try:
+            run_folder.mkdir(parents=False, exist_ok=False)
+            return run_folder
+        except FileExistsError:
+            suffix += 1
 
 
 def enable_run_logging(log_path: Path) -> object:

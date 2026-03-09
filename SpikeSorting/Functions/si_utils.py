@@ -310,6 +310,108 @@ def attach_geometry_if_needed(
     return out
 
 
+def install_si_internal_probe_fix() -> None:
+    """Preserve probe metadata on temporary SpikeInterface snippet objects.
+
+    Some SI/SC2 internal paths keep channel locations but drop the attached
+    Probe/ProbeGroup on temporary snippets. That fallback can trigger repeated
+    "There is no Probe attached..." warnings and slightly shift
+    geometry-aware internal behavior. This runtime patch keeps probe metadata
+    attached through those internal snippet paths.
+    """
+    try:
+        import spikeinterface.core as si_core
+        import spikeinterface.core.snippets_tools as si_snippets_tools
+        from probeinterface import ProbeGroup
+        from spikeinterface.core.baserecordingsnippets import BaseRecordingSnippets
+        from spikeinterface.core.basesnippets import BaseSnippets
+    except Exception as exc:
+        log_warn(f"SI snippet probe fix unavailable: {exc}")
+        return
+
+    applied_any = False
+
+    if "contact_vector" not in BaseSnippets._main_properties:
+        BaseSnippets._main_properties = list(BaseSnippets._main_properties) + ["contact_vector"]
+        applied_any = True
+
+    def _attach_probe_from_source(source_recording, target, *, context_label: str) -> None:
+        try:
+            if target.get_property("contact_vector") is not None:
+                return
+        except Exception:
+            pass
+
+        try:
+            source_contact_vector = source_recording.get_property("contact_vector")
+        except Exception:
+            source_contact_vector = None
+
+        if source_contact_vector is not None:
+            try:
+                target.set_probegroup(source_recording.get_probegroup(), in_place=True)
+                return
+            except Exception as exc:
+                log_warn(f"{context_label}: failed to copy source probe to snippets ({exc})")
+
+        try:
+            positions = source_recording.get_channel_locations()
+            if positions is None:
+                return
+            probe = target.create_dummy_probe_from_locations(positions)
+            probegroup = ProbeGroup()
+            probegroup.add_probe(probe)
+            target.set_probegroup(probegroup, in_place=True)
+        except Exception as exc:
+            log_warn(f"{context_label}: failed to attach fallback dummy probe to snippets ({exc})")
+
+    original_snippets_from_sorting = getattr(si_snippets_tools, "snippets_from_sorting", None)
+    if original_snippets_from_sorting is not None and not getattr(
+        original_snippets_from_sorting, "_si_probe_fix", False
+    ):
+
+        def _patched_snippets_from_sorting(recording, sorting, nbefore=20, nafter=44, wf_folder=None, **job_kwargs):
+            snippets = original_snippets_from_sorting(
+                recording,
+                sorting,
+                nbefore=nbefore,
+                nafter=nafter,
+                wf_folder=wf_folder,
+                **job_kwargs,
+            )
+            _attach_probe_from_source(recording, snippets, context_label="snippets_from_sorting")
+            return snippets
+
+        _patched_snippets_from_sorting._si_probe_fix = True  # type: ignore[attr-defined]
+        si_snippets_tools.snippets_from_sorting = _patched_snippets_from_sorting
+        if getattr(si_core, "snippets_from_sorting", None) is original_snippets_from_sorting:
+            si_core.snippets_from_sorting = _patched_snippets_from_sorting
+        applied_any = True
+
+    original_get_probegroup = BaseRecordingSnippets.get_probegroup
+    if not getattr(original_get_probegroup, "_si_probe_fix", False):
+
+        def _patched_get_probegroup(self):
+            try:
+                if self.get_property("contact_vector") is None:
+                    positions = self.get_property("location")
+                    if positions is not None:
+                        probe = self.create_dummy_probe_from_locations(positions)
+                        probegroup = ProbeGroup()
+                        probegroup.add_probe(probe)
+                        self.set_probegroup(probegroup, in_place=True)
+            except Exception:
+                pass
+            return original_get_probegroup(self)
+
+        _patched_get_probegroup._si_probe_fix = True  # type: ignore[attr-defined]
+        BaseRecordingSnippets.get_probegroup = _patched_get_probegroup
+        applied_any = True
+
+    if applied_any:
+        log_info("SI snippet probe fix enabled.")
+
+
 def prepare_uv_scaling_params(recording, gains, offsets, *, label: str):
     """Validate gain/offset arrays and convert likely V/bit gains to uV/bit."""
     n_ch = recording.get_num_channels()

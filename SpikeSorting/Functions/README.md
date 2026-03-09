@@ -16,7 +16,7 @@ If a run behaves oddly, this is usually where the root cause lives.
 - `channel_utils.py`
   - Channel slicing compatibility, group resolution, bad-channel parsing/detection, OE index fallback mapping.
 - `si_utils.py`
-  - Geometry/probe attachment, in-place group property assignment, OE metadata attach.
+  - Geometry/probe attachment, in-place group property assignment, OE metadata attach, shared SI snippet probe fix.
 - `analyzer_utils.py`
   - SortingAnalyzer build, waveform/template/PC/QC computation, optional redundant-unit cleanup.
 - `phy_export.py`
@@ -57,6 +57,7 @@ If a run behaves oddly, this is usually where the root cause lives.
   - Channels not covered by groups can end up at `(0, 0)`; strict-group workflows should prevent this.
 - Probe attachment:
   - `ensure_probe_attached()` needs channel locations. If missing, analyzer/export stages can fail.
+  - `install_si_internal_probe_fix()` preserves probe metadata on temporary SI snippets so repeated internal dummy-probe warnings are no longer expected in current tet/mixed pipelines.
 - Phy filter flag:
   - `phy_export.py` writes `hp_filtered` even in simple-export return paths.
   - This avoids filtered/unfiltered interpretation drift in Phy.
@@ -107,6 +108,7 @@ If a run behaves oddly, this is usually where the root cause lives.
   - `set_group_property(recording, groups, group_ids)`
   - `ensure_probe_attached(recording, radius=5)`
   - `ensure_geom_and_units(recording, groups, ...)`
+  - `install_si_internal_probe_fix()`
   - `attach_oe_index_from_oebin(recording, data_path, stream_name)`
 - `run_utils.py`
   - `TeeStream`

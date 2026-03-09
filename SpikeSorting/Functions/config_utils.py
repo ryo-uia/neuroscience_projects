@@ -8,6 +8,7 @@ from typing import Iterable
 
 import numpy as np
 
+from .params_utils import merge_params
 from .run_utils import log_info, log_warn
 
 
@@ -20,6 +21,8 @@ def apply_env_overrides_from_env(
     str_or_none_keys: Iterable[str] = (),
     enum_keys: dict[str, set[str]] | None = None,
     positive_number_or_none_keys: Iterable[str] = (),
+    json_object_keys: Iterable[str] = (),
+    merge_object_keys: Iterable[str] = (),
 ):
     """Apply allow-listed JSON overrides from environment to module globals."""
     raw = os.environ.get(env_name, "").strip()
@@ -37,6 +40,8 @@ def apply_env_overrides_from_env(
     bool_key_set = set(bool_keys)
     str_or_none_key_set = set(str_or_none_keys)
     pos_or_none_key_set = set(positive_number_or_none_keys)
+    json_object_key_set = set(json_object_keys)
+    merge_object_key_set = set(merge_object_keys)
     enum_key_map = enum_keys or {}
 
     def _validate_override_value(key: str, value):
@@ -70,6 +75,11 @@ def apply_env_overrides_from_env(
             allowed = sorted(enum_key_map[key])
             return False, None, f"must be one of {allowed}"
 
+        if key in json_object_key_set or key in merge_object_key_set:
+            if isinstance(value, dict):
+                return True, value, ""
+            return False, None, "must be a JSON object"
+
         return True, value, ""
 
     applied = {}
@@ -81,6 +91,10 @@ def apply_env_overrides_from_env(
                 log_warn(f"Ignoring override '{key}': {reason} (got {value!r})")
                 ignored.append(key)
                 continue
+            if key in merge_object_key_set:
+                current_value = module_globals.get(key)
+                if isinstance(current_value, dict):
+                    normalized_value = merge_params(current_value, normalized_value)
             module_globals[key] = normalized_value
             applied[key] = normalized_value
         else:
@@ -133,4 +147,3 @@ __all__ = [
     "apply_env_overrides_from_env",
     "print_pipeline_config_echo",
 ]
-

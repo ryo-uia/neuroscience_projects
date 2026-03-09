@@ -39,6 +39,7 @@ from Functions.si_utils import (
     attach_oe_index_from_oebin,
     attach_geometry_if_needed as attach_geometry_if_needed_shared,
     ensure_probe_attached,
+    install_si_internal_probe_fix,
     maybe_scale_recording_to_uv as maybe_scale_recording_to_uv_shared,
     set_group_property,
 )
@@ -198,6 +199,8 @@ TETRODE_SPACING_DY_UM = 300.0  # synthetic spacing between tetrodes (y)
 
 # Analyzer and QC
 SAVE_ANALYZER = True  # True=persist analyzer to disk (binary_folder); False=skip
+ANALYZER_WF_MS_BEFORE = 1.0  # None=inherit sorter/SC2 window; set larger for QC/Phy visualization
+ANALYZER_WF_MS_AFTER = 2.0  # None=inherit sorter/SC2 window; set larger for QC/Phy visualization
 COMPUTE_QC_METRICS = True  # PC-based metrics add runtime; disable for quick smoke runs
 QC_METRIC_NAMES = [  # no-PC metrics
     "firing_rate",
@@ -241,25 +244,22 @@ SC2_PARAM_OVERRIDES = {  # {}=use SC2 defaults
     # "preprocessing": {
     #     "apply": False,
     # },
-    # Example: adjust detection threshold
+    # Example: adjust detection threshold / sign
     # "detection": {
-    #     "peak_sign": "both",
-    #     "relative_threshold": 5.0,
+    #     "method_kwargs": {
+    #         "peak_sign": "both",
+    #         "detect_threshold": 5,
+    #     },
     # },
 
     # Tetrodes: disable motion correction (intended for dense probes).
     "apply_motion_correction": False,
-    # Match native SC2 waveform window (N_t = 3 ms total).
-    "general": {
-        "ms_before": 1.0,
-        "ms_after": 2.0,
-    },
     # SC2 internal filtering (only used when SC2 preprocessing is enabled).
     "filtering": {
         "freq_min": SI_BP_MIN_HZ,
         "freq_max": SI_BP_MAX_HZ,
     },
-    # Match native SC2 detection threshold and peak sign.
+    # Override current SC2 defaults: keep negative matched filtering and raise threshold to 6.
     "detection": {
         "method": "matched_filtering",
         "method_kwargs": {
@@ -291,7 +291,10 @@ ALLOWED_PIPELINE_OVERRIDES = {
     "EXPORT_TO_PHY",
     "EXPORT_TO_SI_GUI",
     "SAVE_ANALYZER",
+    "ANALYZER_WF_MS_BEFORE",
+    "ANALYZER_WF_MS_AFTER",
     "EXPORT_PHY_CHANNEL_IDS_MODE",
+    "SC2_PARAM_OVERRIDES",
 }
 
 # Debug toggles.
@@ -341,6 +344,8 @@ EFFECTIVE_CONFIG_KEYS = (
     "TETRODE_SPACING_DX_UM",
     "TETRODE_SPACING_DY_UM",
     "SAVE_ANALYZER",
+    "ANALYZER_WF_MS_BEFORE",
+    "ANALYZER_WF_MS_AFTER",
     "COMPUTE_QC_METRICS",
     "QC_METRIC_NAMES",
     "QC_PC_METRICS",
@@ -396,7 +401,8 @@ def apply_env_pipeline_overrides():
             "CAR_MODE": {"global", "tetrode"},
             "EXPORT_PHY_CHANNEL_IDS_MODE": {"oe_label", "oe_index", "as_exported"},
         },
-        positive_number_or_none_keys={"TEST_SECONDS"},
+        positive_number_or_none_keys={"TEST_SECONDS", "ANALYZER_WF_MS_BEFORE", "ANALYZER_WF_MS_AFTER"},
+        merge_object_keys={"SC2_PARAM_OVERRIDES"},
     )
 
 
@@ -1363,13 +1369,8 @@ def require_group_recording(rec_dict, key, dict_name: str):
 
 
 # Sorting/Postprocessing Helpers
-def prepare_sc2_runtime_params(rec_sc2, groups, group_ids):
-    """Prepare SC2 params and analyzer waveform window settings."""
-    log_section("Sorting")
-    # Ensure group property is present for downstream split/export behavior.
-    set_group_property(rec_sc2, groups, group_ids)
-    assert_group_property_mapping(rec_sc2, groups, group_ids, "rec_sc2")
-
+def resolve_sc2_runtime_params(*, emit_logs: bool = False):
+    """Resolve final SC2 params plus sorter/analyzer waveform windows."""
     sc2_defaults = ss.Spykingcircus2Sorter.default_params()
     warn_unknown_sc2_overrides(sc2_defaults, SC2_PARAM_OVERRIDES)
     sc2_params = merge_params(sc2_defaults, SC2_PARAM_OVERRIDES)
@@ -1379,44 +1380,66 @@ def prepare_sc2_runtime_params(rec_sc2, groups, group_ids):
     # Keep SC2 execution conservative/stable unless explicitly overridden.
     sc2_params.setdefault("job_kwargs", {})
     sc2_params["job_kwargs"].setdefault("n_jobs", 1)
-    if USE_SI_PREPROCESS and sc2_params.get("apply_preprocessing", True):
+    if emit_logs and USE_SI_PREPROCESS and sc2_params.get("apply_preprocessing", True):
         print(
             "WARNING: both SI and SC2 preprocessing are enabled; "
             "this will apply filter/reference stages twice."
         )
-    if SI_APPLY_CAR and sc2_params.get("apply_preprocessing", True):
+    if emit_logs and SI_APPLY_CAR and sc2_params.get("apply_preprocessing", True):
         print(
             "WARNING: SI CAR is enabled while SC2 preprocessing is on; "
             "SC2 will also apply global CMR (double reference)."
         )
     # Whitening guard: SC2 whitening cannot be disabled in the current SI wrapper,
     # so enabling SI whitening will double-whiten the data.
-    if SI_APPLY_WHITEN:
+    if emit_logs and SI_APPLY_WHITEN:
         print("WARNING: SI whitening is enabled; SC2 will also whiten (double-whitening).")
-    if SC2_PARAM_OVERRIDES:
+    if emit_logs and SC2_PARAM_OVERRIDES:
         print(f"Applying SC2 overrides: {SC2_PARAM_OVERRIDES}")
-    print(
-        "SC2 params -> apply_preprocessing:",
-        sc2_params.get("apply_preprocessing"),
-        "| whitening: wrapper-controlled (applied internally by SC2)",
-    )
-    print("SC2 params -> job_kwargs:", sc2_params.get("job_kwargs"))
-    if not sc2_params.get("apply_preprocessing", True) and isinstance(sc2_params.get("filtering"), dict):
+    if emit_logs:
         print(
-            "SC2 params -> filtering overrides present but SC2 preprocessing is disabled "
-            "(apply_preprocessing=False); SC2 bandpass/CMR step is skipped."
+            "SC2 params -> apply_preprocessing:",
+            sc2_params.get("apply_preprocessing"),
+            "| whitening: wrapper-controlled (applied internally by SC2)",
         )
-    if isinstance(sc2_params.get("whitening"), dict):
-        print("SC2 params -> whitening:", sc2_params.get("whitening"))
+        print("SC2 params -> job_kwargs:", sc2_params.get("job_kwargs"))
+        if not sc2_params.get("apply_preprocessing", True) and isinstance(sc2_params.get("filtering"), dict):
+            print(
+                "SC2 params -> filtering overrides present but SC2 preprocessing is disabled "
+                "(apply_preprocessing=False); SC2 bandpass/CMR step is skipped."
+            )
+        if isinstance(sc2_params.get("whitening"), dict):
+            print("SC2 params -> whitening:", sc2_params.get("whitening"))
 
-    analyzer_ms_before = None
-    analyzer_ms_after = None
+    sorter_ms_before = None
+    sorter_ms_after = None
     try:
         general = sc2_params.get("general", {}) if isinstance(sc2_params, dict) else {}
-        analyzer_ms_before = general.get("ms_before")
-        analyzer_ms_after = general.get("ms_after")
+        sorter_ms_before = general.get("ms_before")
+        sorter_ms_after = general.get("ms_after")
     except Exception:
         pass
+    if emit_logs and (sorter_ms_before is not None or sorter_ms_after is not None):
+        print(
+            "SC2 sorter waveform window:",
+            f"{sorter_ms_before} ms before / {sorter_ms_after} ms after",
+        )
+
+    analyzer_ms_before = ANALYZER_WF_MS_BEFORE if ANALYZER_WF_MS_BEFORE is not None else sorter_ms_before
+    analyzer_ms_after = ANALYZER_WF_MS_AFTER if ANALYZER_WF_MS_AFTER is not None else sorter_ms_after
+    return sc2_params, sorter_ms_before, sorter_ms_after, analyzer_ms_before, analyzer_ms_after
+
+
+def prepare_sc2_runtime_params(rec_sc2, groups, group_ids):
+    """Prepare SC2 params and analyzer waveform window settings."""
+    log_section("Sorting")
+    # Ensure group property is present for downstream split/export behavior.
+    set_group_property(rec_sc2, groups, group_ids)
+    assert_group_property_mapping(rec_sc2, groups, group_ids, "rec_sc2")
+
+    sc2_params, sorter_ms_before, sorter_ms_after, analyzer_ms_before, analyzer_ms_after = resolve_sc2_runtime_params(
+        emit_logs=True
+    )
     if analyzer_ms_before is not None or analyzer_ms_after is not None:
         print(
             "Analyzer waveform window:",
@@ -1442,8 +1465,7 @@ def run_sorting_stage(
     phy_folders = []
     si_gui_folders = []
     sorter_folder = sc2_run / "sorter_output"
-    # reserve_run_folder() only reserves a unique path; ensure parent exists
-    # before passing a nested sorter folder to SI.
+    # Keep this mkdir for robustness before passing a nested sorter folder to SI.
     sorter_folder.parent.mkdir(parents=True, exist_ok=True)
     try:
         if SORT_BY_GROUP:
@@ -1697,6 +1719,9 @@ def main():
     # Apply strict RAW_MODE policy after env overrides so wrapper/env can enable it.
     apply_raw_mode_policy()
     validate_preprocess_toggles()
+    # Install before any sorter/snippet work so SC2 internal temporary objects
+    # retain probe metadata instead of falling back to dummy-probe warnings.
+    install_si_internal_probe_fix()
     if applied_overrides:
         log_info(f"Applied pipeline overrides from env: {sorted(applied_overrides.keys())}")
     if ignored_overrides:
@@ -1773,6 +1798,21 @@ def main():
         sc2_run,
     )
     if should_exit_early:
+        sc2_params, _, _, _, _ = resolve_sc2_runtime_params()
+        write_effective_config(
+            sc2_run=sc2_run,
+            args=args,
+            use_config_jsons=use_config_jsons,
+            root_dir=root_dir,
+            selected_session_path=selected_session_path,
+            selected_stream=selected_stream,
+            applied_overrides=applied_overrides,
+            ignored_overrides=ignored_overrides,
+            groups=groups,
+            group_ids=group_ids,
+            grouping_details=grouping_details,
+            sc2_params=sc2_params,
+        )
         return
 
     tetrodes_per_row, tetrode_offsets = compute_tetrode_layout(

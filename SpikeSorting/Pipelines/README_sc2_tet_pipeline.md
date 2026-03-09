@@ -113,6 +113,7 @@ Notes:
 
 - By default, the script prompts for session selection when `SESSION_SUBPATH` is not set.
 - For quick tests, set `TEST_SECONDS=300` in the script; set back to `None` for full runs.
+- `--dry-run-config` now also writes `sc2_outputs/sc2_run_*/effective_config.json`, so you can inspect the exact resolved settings without running sorting.
 - In this workspace, VS Code is pinned to the `spikeinterface` interpreter, so plain `python ...` is the default path.
 - Advanced orchestration (SpikeAgent and job-wrapper) is documented in `SpikeSorting/Pipelines/README_sc2_tet_advanced.md`.
 
@@ -133,19 +134,24 @@ Notes:
 | `SI_APPLY_WHITEN` | `True` / `False` | `False` | Avoid double-whitening in most cases. |
 | `EXPORT_PHY_CHANNEL_IDS_MODE` | `"oe_label"`, `"oe_index"`, `"as_exported"` | `"oe_label"` | Affects `channel_ids` metadata for downstream analysis. |
 | `SAVE_ANALYZER` | `True` / `False` | `True` | Saves analyzer folder for QC reuse. |
+| `ANALYZER_WF_MS_BEFORE` | `None` or positive ms | `1.0` | Analyzer/Phy waveform window before peak. `None` inherits the sorter window. |
+| `ANALYZER_WF_MS_AFTER` | `None` or positive ms | `2.0` | Analyzer/Phy waveform window after peak. `None` inherits the sorter window. |
 
 Additional runtime safeguards:
 - Groups with fewer than 2 channels are dropped automatically before sorting.
 - Groups with fewer than 3 channels are kept but logged as a warning.
-- In per-group mode, each split recording is coerced to a single dummy probe from channel locations (strict; failure stops the run).
+- In per-group mode, each split sorter input is still coerced to a single probe from channel locations (strict; failure stops the run).
+- The pipeline also installs an SI snippet probe-metadata fix before sorting, so SC2 internal temporary snippet objects retain probe geometry instead of emitting repeated `There is no Probe attached...` warnings.
 - Per-group mode requires valid channel locations (normally keep `ATTACH_GEOMETRY=True`).
 - Group lookups are strict in per-group mode (missing group key raises immediately; no fallback to full recording).
 - SC2 `job_kwargs.n_jobs` defaults to `1` for stable multiprocessing behavior.
 - SC2 can show small run-to-run variation in intermediate clustering counts (for example `Kept X clean clusters`) due to stochastic components; this is expected unless deterministic settings are forced.
+- Run folders/logs are reserved atomically, so concurrent launches in the same second get distinct `sc2_run_*` folders and `run_logs/sc2_run_*.log` files.
 - If both `USE_SI_PREPROCESS=True` and `USE_SC2_PREPROCESS=True`, filter/reference stages are applied twice (intentional test mode; logged with warnings).
 - If both `USE_SI_PREPROCESS=False` and `USE_SC2_PREPROCESS=False`, the run proceeds in raw/no-internal mode (optional no-SI CAR/notch settings may still apply).
 - If `USE_SI_PREPROCESS=False` and `SI_APPLY_CAR=True`, SI CAR still runs in the no-SI path (intentional CAR-only behavior; logged with warning).
 - Phy `hp_filtered` describes the exported analyzer recording path, not SC2 internal preprocessing used during sorting.
+- Sorter and analyzer waveform windows are configured separately: SC2 sorting follows current SC2 defaults unless you explicitly override `SC2_PARAM_OVERRIDES["general"]`, while analyzer/Phy extraction uses `ANALYZER_WF_MS_BEFORE` / `ANALYZER_WF_MS_AFTER`.
 - Empty JSON semantics are explicit: `[]` in `--channel-groups` means no groups (not fallback), and `[]` in `--bad-channels` means no bad channels (not fallback).
 - If `structure.oebin` stream matching is ambiguous, OE metadata attach (`oe_channel_index` / `oe_gain_to_uV`) is skipped to avoid incorrect mapping.
 
@@ -155,6 +161,8 @@ Key recommendations:
 - `SORT_BY_GROUP=False` (bundle run first), then cross-check with `SORT_BY_GROUP=True`
 - `USE_SI_PREPROCESS=True`, `USE_SC2_PREPROCESS=False`, `SI_APPLY_CAR=False`, `SI_APPLY_WHITEN=False`
 - `EXPORT_PHY_CHANNEL_IDS_MODE="oe_label"` for clearest channel traceability
+- Keep SC2 sorter waveform window at its default unless you have a specific reason to override `SC2_PARAM_OVERRIDES["general"]`
+- Use `ANALYZER_WF_MS_BEFORE=1.0` and `ANALYZER_WF_MS_AFTER=2.0` for a slightly longer QC/Phy view without changing sorter behavior
 
 ## Key Outputs
 
@@ -162,7 +170,7 @@ Under `base_out` (default `SpikeSorting/`):
 
 - `sc2_outputs/run_logs/sc2_run_*.log`: run log.
 - `sc2_outputs/sc2_run_*/sorter_output`: sorter output folder.
-- `sc2_outputs/sc2_run_*/effective_config.json`: resolved run settings snapshot (post env overrides and `RAW_MODE` policy), selected session/stream, grouping/bad-channel details, and final `sc2_params`.
+- `sc2_outputs/sc2_run_*/effective_config.json`: resolved run settings snapshot (post env overrides and `RAW_MODE` policy), selected session/stream, grouping/bad-channel details, and final `sc2_params`. This is written for both dry-runs and real runs.
 - `sc2_outputs/sc2_run_*/rec_*` (only when `MATERIALIZE_*` flags are enabled): run-scoped materialized recordings.
 - `sc2_outputs/phy_sc2_*/` (or `phy_sc2_g*/` when `SORT_BY_GROUP=True`): Phy exports.
   - Includes `params.py`, `recording.dat`, `channel_id_map.tsv`.
