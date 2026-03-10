@@ -236,6 +236,7 @@ def export_for_phy(
         remove_if_exists=True,
         copy_binary=True,
         sparsity=export_sparsity,
+        verbose=False,
     )
     export_recording = analyzer.recording
     export_source = "analyzer.recording"
